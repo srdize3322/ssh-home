@@ -25,6 +25,13 @@ HOST_VIEW_ALL = "all"
 HOST_VIEW_FAVORITES = "favorites"
 HOST_VIEW_RECENTS = "recents"
 HOST_VIEWS = (HOST_VIEW_ALL, HOST_VIEW_FAVORITES, HOST_VIEW_RECENTS)
+TUI_COLOR_PAIR_IDS = {
+    "brand": 1,
+    "accent": 2,
+    "favorite": 3,
+    "muted": 4,
+    "error": 5,
+}
 
 
 class SSHHomeError(Exception):
@@ -120,6 +127,139 @@ class TUISelection:
     host: str
     path: str
     session: "SSHMasterSession"
+
+
+@dataclass(frozen=True)
+class TUILayout:
+    mode: str
+    height: int
+    width: int
+    header_rows: int
+    list_start: int
+    list_width: int
+    panel_x: int
+    panel_width: int
+    show_panel: bool
+    show_graph: bool
+    show_logo: bool
+
+
+def layout_for_size(height: int, width: int) -> TUILayout:
+    safe_width = max(1, width)
+    safe_height = max(1, height)
+
+    if safe_width >= 100 and safe_height >= 22:
+        list_width = max(34, min(int(safe_width * 0.56), safe_width - 36))
+        panel_x = list_width + 2
+        panel_width = max(0, safe_width - panel_x - 1)
+        return TUILayout(
+            mode="full",
+            height=safe_height,
+            width=safe_width,
+            header_rows=5,
+            list_start=7,
+            list_width=list_width,
+            panel_x=panel_x,
+            panel_width=panel_width,
+            show_panel=panel_width >= 28,
+            show_graph=panel_width >= 30,
+            show_logo=True,
+        )
+
+    if safe_width >= 72 and safe_height >= 18:
+        panel_width = 26 if safe_width >= 86 else 0
+        panel_x = max(0, safe_width - panel_width - 1) if panel_width else safe_width
+        list_width = panel_x - 2 if panel_width else safe_width - 1
+        return TUILayout(
+            mode="compact",
+            height=safe_height,
+            width=safe_width,
+            header_rows=4,
+            list_start=6,
+            list_width=max(28, list_width),
+            panel_x=panel_x,
+            panel_width=panel_width,
+            show_panel=panel_width >= 24,
+            show_graph=False,
+            show_logo=safe_width >= 86,
+        )
+
+    return TUILayout(
+        mode="minimal",
+        height=safe_height,
+        width=safe_width,
+        header_rows=3,
+        list_start=4,
+        list_width=safe_width - 1,
+        panel_x=safe_width,
+        panel_width=0,
+        show_panel=False,
+        show_graph=False,
+        show_logo=False,
+    )
+
+
+def truncate_middle(value: object, width: int) -> str:
+    text = str(value)
+    if width <= 0:
+        return ""
+    if len(text) <= width:
+        return text
+    if width <= 3:
+        return text[:width]
+    left = (width - 3) // 2
+    right = width - 3 - left
+    return f"{text[:left]}...{text[-right:]}"
+
+
+def make_bar(label: str, value: int, total: int, width: int) -> str:
+    if width <= 0:
+        return ""
+    short_label = truncate_middle(label, 6).ljust(min(6, max(3, len(label))))
+    prefix = f"{short_label} "
+    suffix = f" {max(0, value)}"
+    bar_width = width - len(prefix) - len(suffix) - 2
+    if bar_width < 4:
+        return truncate_middle(f"{label} {value}", width)
+    ratio = 0 if total <= 0 else max(0.0, min(1.0, value / total))
+    filled = int(round(bar_width * ratio))
+    bar = "#" * filled + "-" * (bar_width - filled)
+    return truncate_middle(f"{prefix}[{bar}]{suffix}", width)
+
+
+def host_group_counts(hosts: list[str], state: "SSHHomeState") -> dict[str, int]:
+    favorites = set(favorite_hosts(hosts, state))
+    recents = {host for host in recent_hosts(hosts, state) if host not in favorites}
+    other_count = max(0, len(hosts) - len(favorites) - len(recents))
+    return {
+        "favorites": len(favorites),
+        "recent": len(recents),
+        "other": other_count,
+    }
+
+
+def init_curses_palette(curses_mod) -> dict[str, int]:
+    palette = {name: 0 for name in TUI_COLOR_PAIR_IDS}
+    try:
+        if not curses_mod.has_colors():
+            return palette
+        curses_mod.start_color()
+        if hasattr(curses_mod, "use_default_colors"):
+            curses_mod.use_default_colors()
+        pair_defs = {
+            "brand": (curses_mod.COLOR_CYAN, -1),
+            "accent": (curses_mod.COLOR_GREEN, -1),
+            "favorite": (curses_mod.COLOR_YELLOW, -1),
+            "muted": (curses_mod.COLOR_BLUE, -1),
+            "error": (curses_mod.COLOR_RED, -1),
+        }
+        for name, (foreground, background) in pair_defs.items():
+            pair_id = TUI_COLOR_PAIR_IDS[name]
+            curses_mod.init_pair(pair_id, foreground, background)
+            palette[name] = curses_mod.color_pair(pair_id)
+    except Exception:
+        return {name: 0 for name in TUI_COLOR_PAIR_IDS}
+    return palette
 
 
 def default_state_path() -> Path:
@@ -580,6 +720,7 @@ class SSHHomeTUI:
         self.show_help = False
         self.status_message = "Ready"
         self.resolved_cache: dict[str, ResolvedHost] = {}
+        self.palette = init_curses_palette(self._curses)
 
     def run(self) -> TUISelection:
         if self.initial_host:
@@ -851,64 +992,203 @@ class SSHHomeTUI:
 
     def _draw_prompt(self, label: str, current: str) -> None:
         height, width = self.stdscr.getmaxyx()
+        if height < 2:
+            return
         self.stdscr.move(height - 2, 0)
         self.stdscr.clrtoeol()
-        self.stdscr.addnstr(height - 2, 0, label, width - 1, self._curses.A_BOLD)
+        self._draw(height - 2, 0, label, width - 1, self._attr("brand", bold=True))
         self.stdscr.move(height - 1, 0)
         self.stdscr.clrtoeol()
-        self.stdscr.addnstr(height - 1, 0, current, width - 1)
+        self._draw(height - 1, 0, current, width - 1)
         self.stdscr.refresh()
 
-    def _render_host_screen(self, hosts: list[str], selected: str | None) -> None:
+    def _attr(
+        self,
+        color: str | None = None,
+        *,
+        bold: bool = False,
+        dim: bool = False,
+        reverse: bool = False,
+    ) -> int:
         curses = self._curses
+        attr = self.palette.get(color or "", 0)
+        if bold:
+            attr |= curses.A_BOLD
+        if dim:
+            attr |= curses.A_DIM
+        if reverse:
+            attr |= curses.A_REVERSE
+        return attr
+
+    def _draw(self, y: int, x: int, text: object, width: int, attr: int = 0) -> None:
+        screen_height, screen_width = self.stdscr.getmaxyx()
+        if y < 0 or y >= screen_height or x < 0 or x >= screen_width:
+            return
+        safe_width = min(max(0, width), screen_width - x)
+        if safe_width <= 0:
+            return
+        try:
+            self.stdscr.addnstr(y, x, truncate_middle(text, safe_width), safe_width, attr)
+        except Exception:
+            # Curses can reject writes at the bottom-right cell on some terminals.
+            return
+
+    def _render_header(self, layout: TUILayout, context: str, detail: str) -> None:
+        if layout.mode == "minimal":
+            self._draw(
+                0,
+                0,
+                f"ssh> {context}",
+                layout.width - 1,
+                self._attr("brand", bold=True),
+            )
+            self._draw(1, 0, detail, layout.width - 1, self._attr("muted", dim=True))
+            return
+
+        self._draw(
+            0,
+            0,
+            "ssh-home :: project by srdize3322",
+            layout.width - 1,
+            self._attr("brand", bold=True),
+        )
+        badge = "ssh://home"
+        if layout.show_logo:
+            self._draw(
+                0,
+                max(0, layout.width - len(badge) - 1),
+                badge,
+                len(badge),
+                self._attr("accent", bold=True),
+            )
+        self._draw(1, 0, context, layout.width - 1, self._attr("accent"))
+        self._draw(2, 0, detail, layout.width - 1, self._attr("muted", dim=True))
+
+    def _render_host_panel(
+        self,
+        layout: TUILayout,
+        selected: str,
+        counts: dict[str, int],
+    ) -> None:
+        if not layout.show_panel:
+            return
+
+        resolved = self._resolved_host(selected)
+        x = layout.panel_x
+        width = layout.panel_width
+        row = 4 if layout.mode == "full" else 5
+        self._draw(row, x, "SSH NODE", width, self._attr("brand", bold=True))
+        self._draw(row + 1, x, "ssh://home", width, self._attr("accent"))
+        self._draw(row + 2, x, "project by srdize3322", width, self._attr("muted", dim=True))
+
+        details = [
+            ("Alias", resolved.alias),
+            ("User", resolved.user or "-"),
+            ("HostName", resolved.hostname or "-"),
+            ("Port", resolved.port or "-"),
+            ("ProxyJump", resolved.proxyjump or "-"),
+            ("Favorite", "yes" if self.state.is_favorite(selected) else "no"),
+            ("Last path", self.state.last_path(selected) or "-"),
+        ]
+        detail_row = row + 4
+        for offset, (label, value) in enumerate(details):
+            if detail_row + offset >= layout.height - 2:
+                break
+            available = max(1, width - len(label) - 2)
+            self._draw(
+                detail_row + offset,
+                x,
+                f"{label:<9} {truncate_middle(value, available)}",
+                width,
+            )
+
+        if not layout.show_graph:
+            return
+
+        graph_row = detail_row + len(details) + 2
+        if graph_row + 4 >= layout.height - 2:
+            return
+        total = sum(counts.values())
+        self._draw(graph_row, x, "HOST MIX", width, self._attr("favorite", bold=True))
+        self._draw(graph_row + 1, x, make_bar("fav", counts["favorites"], total, width), width)
+        self._draw(graph_row + 2, x, make_bar("recent", counts["recent"], total, width), width)
+        self._draw(graph_row + 3, x, make_bar("other", counts["other"], total, width), width)
+
+    def _render_directory_panel(self, layout: TUILayout, host: str, current_path: str) -> None:
+        if not layout.show_panel:
+            return
+        x = layout.panel_x
+        width = layout.panel_width
+        row = 4 if layout.mode == "full" else 5
+        depth = len([part for part in current_path.split("/") if part])
+        self._draw(row, x, "SESSION", width, self._attr("brand", bold=True))
+        self._draw(row + 1, x, "ssh://home", width, self._attr("accent"))
+        self._draw(row + 2, x, f"host {host}", width)
+        self._draw(row + 3, x, f"path {breadcrumb_path(current_path)}", width)
+        if layout.show_graph and row + 6 < layout.height - 2:
+            self._draw(row + 5, x, "PATH DEPTH", width, self._attr("favorite", bold=True))
+            self._draw(row + 6, x, make_bar("depth", min(depth, 12), 12, width), width)
+
+    def _render_host_screen(self, hosts: list[str], selected: str | None) -> None:
         self.stdscr.erase()
         height, width = self.stdscr.getmaxyx()
-        list_width = max(28, min(width - 2, int(width * 0.58)))
-        panel_x = list_width + 2
-        panel_width = max(0, width - panel_x - 1)
-        title = f"ssh-home  HOMELAB PRO  [{host_view_label(self.host_view)}]"
-        stats = (
-            f"hosts {len(self.hosts)} | fav {len(favorite_hosts(self.hosts, self.state))} | "
-            f"recent {len(recent_hosts(self.hosts, self.state))}"
+        layout = layout_for_size(height, width)
+        counts = host_group_counts(self.hosts, self.state)
+        context = (
+            f"HOMELAB PRO [{host_view_label(self.host_view)}] | "
+            f"{len(hosts)}/{len(self.hosts)} visible"
         )
-        self.stdscr.addnstr(0, 0, title, width - 1, curses.A_BOLD)
-        self.stdscr.addnstr(1, 0, stats, width - 1, curses.A_DIM)
-        self.stdscr.addnstr(3, 0, f"Filter: {self.host_query or 'none'}", list_width, curses.A_BOLD)
-        self.stdscr.addnstr(4, 0, f"Visible: {len(hosts)}", list_width, curses.A_DIM)
+        detail = (
+            f"hosts {len(self.hosts)} | fav {counts['favorites']} | "
+            f"recent {counts['recent']} | filter {self.host_query or 'none'}"
+        )
+        self._render_header(layout, context, detail)
 
-        details_start = 3
+        filter_row = 3 if layout.mode == "minimal" else 4
+        self._draw(
+            filter_row,
+            0,
+            f"Filter: {self.host_query or 'none'}",
+            layout.list_width,
+            self._attr("brand", bold=True),
+        )
+        if layout.mode != "minimal":
+            self._draw(
+                filter_row + 1,
+                0,
+                "Hosts",
+                layout.list_width,
+                self._attr("muted", dim=True),
+            )
+
         if selected is not None:
-            resolved = self._resolved_host(selected)
-            if panel_width > 12:
-                self.stdscr.addnstr(3, panel_x, "HOST", panel_width, curses.A_BOLD)
-                self.stdscr.addnstr(details_start + 2, panel_x, f"Alias      {resolved.alias}", panel_width)
-                self.stdscr.addnstr(details_start + 3, panel_x, f"User       {resolved.user or '-'}", panel_width)
-                self.stdscr.addnstr(details_start + 4, panel_x, f"HostName   {resolved.hostname or '-'}", panel_width)
-                self.stdscr.addnstr(details_start + 5, panel_x, f"Port       {resolved.port or '-'}", panel_width)
-                self.stdscr.addnstr(details_start + 6, panel_x, f"ProxyJump  {resolved.proxyjump or '-'}", panel_width)
-                self.stdscr.addnstr(
-                    details_start + 8,
-                    panel_x,
-                    f"Favorite   {'yes' if self.state.is_favorite(selected) else 'no'}",
-                    panel_width,
-                )
-                self.stdscr.addnstr(
-                    details_start + 9,
-                    panel_x,
-                    f"Last path  {self.state.last_path(selected) or '-'}",
-                    panel_width,
-                )
+            self._render_host_panel(layout, selected, counts)
 
-        list_start = 6
-        visible_rows = max(3, height - list_start - 2)
+        list_start = layout.list_start
+        visible_rows = max(0, height - list_start - 2)
         offset = self._scroll_offset(self.host_index, len(hosts), visible_rows)
-        for row, host in enumerate(hosts[offset : offset + visible_rows]):
-            index = offset + row
-            attr = curses.A_REVERSE if index == self.host_index else curses.A_NORMAL
-            label = self._label_for_host(host)
-            self.stdscr.addnstr(list_start + row, 0, label, list_width, attr)
+        if visible_rows <= 0:
+            pass
+        elif not hosts:
+            self._draw(
+                list_start,
+                0,
+                "No matching SSH hosts. Backspace clears the filter.",
+                layout.list_width,
+                self._attr("error"),
+            )
+        else:
+            for row, host in enumerate(hosts[offset : offset + visible_rows]):
+                index = offset + row
+                group = host_group(host, self.state)
+                color = {"favorite": "favorite", "recent": "accent", "host": None}[group]
+                attr = self._attr(color, reverse=index == self.host_index)
+                label = self._label_for_host(host)
+                self._draw(list_start + row, 0, label, layout.list_width, attr)
 
         if self.show_help:
+            help_x = layout.panel_x if layout.show_panel else max(0, width - 25)
+            help_width = layout.panel_width if layout.show_panel else min(24, width - 1)
             self._render_help_box(
                 [
                     "Enter open",
@@ -919,13 +1199,13 @@ class SSHHomeTUI:
                     "Tab view",
                     "q quit",
                 ],
-                panel_x,
+                help_x,
                 height,
-                panel_width,
+                help_width,
             )
 
         footer = f"{self.status_message} | ? help | Enter open | f fav | l last | r recent | a all | Tab view | q"
-        self.stdscr.addnstr(height - 1, 0, footer, width - 1, curses.A_DIM)
+        self._draw(height - 1, 0, footer, width - 1, self._attr("muted", dim=True))
         self.stdscr.refresh()
 
     def _render_directory_screen(
@@ -934,24 +1214,50 @@ class SSHHomeTUI:
         current_path: str,
         entries: list[tuple[str, str]],
     ) -> None:
-        curses = self._curses
         self.stdscr.erase()
         height, width = self.stdscr.getmaxyx()
-        self.stdscr.addnstr(0, 0, f"ssh-home  {host}", width - 1, curses.A_BOLD)
-        self.stdscr.addnstr(1, 0, f"Path: {breadcrumb_path(current_path)}", width - 1)
-        self.stdscr.addnstr(3, 0, f"Filter: {self.dir_query or 'none'}", width - 1, curses.A_BOLD)
+        layout = layout_for_size(height, width)
+        context = f"REMOTE BROWSER | host {host}"
+        detail = f"path {breadcrumb_path(current_path)} | filter {self.dir_query or 'none'}"
+        self._render_header(layout, context, detail)
+        self._draw(
+            3 if layout.mode == "minimal" else 4,
+            0,
+            f"Filter: {self.dir_query or 'none'}",
+            layout.list_width,
+            self._attr("brand", bold=True),
+        )
+        if layout.mode != "minimal":
+            self._draw(
+                5,
+                0,
+                f"Path: {breadcrumb_path(current_path)}",
+                layout.list_width,
+                self._attr("muted", dim=True),
+            )
+        self._render_directory_panel(layout, host, current_path)
 
-        list_start = 5
-        visible_rows = max(3, height - list_start - 2)
+        list_start = layout.list_start
+        visible_rows = max(0, height - list_start - 2)
         offset = self._scroll_offset(self.dir_index, len(entries), visible_rows)
-        for row, entry in enumerate(entries[offset : offset + visible_rows]):
-            index = offset + row
-            attr = curses.A_REVERSE if index == self.dir_index else curses.A_NORMAL
-            entry_type, value = entry
-            label = self._label_for_directory_entry(entry_type, value)
-            self.stdscr.addnstr(list_start + row, 0, label, width - 1, attr)
+        if visible_rows > 0:
+            for row, entry in enumerate(entries[offset : offset + visible_rows]):
+                index = offset + row
+                entry_type, value = entry
+                color = {
+                    "use": "accent",
+                    "parent": "muted",
+                    "manual": "brand",
+                    "hosts": "favorite",
+                    "dir": None,
+                }.get(entry_type)
+                attr = self._attr(color, reverse=index == self.dir_index)
+                label = self._label_for_directory_entry(entry_type, value)
+                self._draw(list_start + row, 0, label, layout.list_width, attr)
 
         if self.show_help:
+            help_x = layout.panel_x if layout.show_panel else max(0, width - 25)
+            help_width = layout.panel_width if layout.show_panel else min(24, width - 1)
             self._render_help_box(
                 [
                     "Enter open/use",
@@ -963,25 +1269,25 @@ class SSHHomeTUI:
                     "Tab hosts",
                     "q quit",
                 ],
-                max(0, width - 24),
+                help_x,
                 height,
-                min(23, width - 1),
+                help_width,
             )
 
         footer = (
             f"{self.status_message} | ? help | Enter open/use | Left up | / path | "
             "l last | r refresh | Tab hosts | q"
         )
-        self.stdscr.addnstr(height - 1, 0, footer, width - 1, curses.A_DIM)
+        self._draw(height - 1, 0, footer, width - 1, self._attr("muted", dim=True))
         self.stdscr.refresh()
 
     def _render_help_box(self, lines: list[str], x: int, height: int, width: int) -> None:
         if width < 12 or x >= self.stdscr.getmaxyx()[1] - 1:
             return
         start_y = max(3, height - len(lines) - 4)
-        self.stdscr.addnstr(start_y, x, "HELP", width, self._curses.A_BOLD)
+        self._draw(start_y, x, "HELP :: keys", width, self._attr("brand", bold=True))
         for index, line in enumerate(lines, start=1):
-            self.stdscr.addnstr(start_y + index, x, line, width)
+            self._draw(start_y + index, x, line, width)
 
     def _label_for_host(self, host: str) -> str:
         group = host_group(host, self.state)

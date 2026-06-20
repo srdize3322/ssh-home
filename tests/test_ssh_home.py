@@ -341,6 +341,57 @@ class TUIHelperTests(unittest.TestCase):
         self.assertTrue(ui._is_enter("\n"))
         self.assertTrue(ui._is_enter("\r"))
 
+    def test_layout_for_size_uses_responsive_breakpoints(self) -> None:
+        full = ssh_home.layout_for_size(24, 120)
+        compact = ssh_home.layout_for_size(24, 90)
+        minimal = ssh_home.layout_for_size(16, 60)
+
+        self.assertEqual(full.mode, "full")
+        self.assertTrue(full.show_panel)
+        self.assertTrue(full.show_graph)
+        self.assertLess(full.panel_x + full.panel_width, full.width)
+        self.assertEqual(compact.mode, "compact")
+        self.assertTrue(compact.show_panel)
+        self.assertFalse(compact.show_graph)
+        self.assertEqual(minimal.mode, "minimal")
+        self.assertFalse(minimal.show_panel)
+
+    def test_truncate_middle_keeps_edges_inside_width(self) -> None:
+        value = ssh_home.truncate_middle("/srv/app/releases/current", 12)
+        self.assertEqual(len(value), 12)
+        self.assertTrue(value.startswith("/srv"))
+        self.assertTrue(value.endswith("rrent"))
+
+    def test_make_bar_fits_requested_width(self) -> None:
+        bar = ssh_home.make_bar("fav", 2, 4, 18)
+        self.assertEqual(len(bar), 18)
+        self.assertIn("[", bar)
+        self.assertIn("]", bar)
+        self.assertIn("2", bar)
+
+    def test_host_group_counts_splits_favorites_recents_and_other(self) -> None:
+        state = ssh_home.SSHHomeState(path=None, enabled=True)
+        state.toggle_favorite("app-prod")
+        state.data["recents"] = {"app-prod": 20.0, "gateway": 10.0}
+
+        counts = ssh_home.host_group_counts(["app-prod", "gateway", "nested-a"], state)
+
+        self.assertEqual(counts, {"favorites": 1, "recent": 1, "other": 1})
+
+    def test_init_curses_palette_noops_without_color_support(self) -> None:
+        class NoColorCurses:
+            @staticmethod
+            def has_colors() -> bool:
+                return False
+
+            @staticmethod
+            def start_color() -> None:
+                raise AssertionError("start_color should not be called")
+
+        palette = ssh_home.init_curses_palette(NoColorCurses)
+
+        self.assertEqual(palette, {name: 0 for name in ssh_home.TUI_COLOR_PAIR_IDS})
+
 
 class PublicSafetyTests(unittest.TestCase):
     def test_repo_files_do_not_include_private_markers(self) -> None:

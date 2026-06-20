@@ -1,8 +1,10 @@
 # ssh-home
 
-Gestor SSH interactivo y portable para equipos que ya tienen OpenSSH configurado.
+Gestor SSH interactivo y portable para equipos que ya tienen OpenSSH configurado. Proyecto de `srdize3322`.
 
 `ssh-home` lee únicamente tu `~/.ssh/config` local, muestra los aliases disponibles, abre una conexión maestra temporal y te deja navegar carpetas remotas antes de entrar al shell definitivo. No usa inventarios privados, no depende de `.env` y no guarda contraseñas.
+
+La interfaz tiene un look sobrio de homelab/cockpit: header `ssh-home :: project by srdize3322`, badge `ssh://home`, colores discretos si el terminal los soporta y un mini gráfico local de favoritos/recientes/otros hosts.
 
 ## Comando global
 
@@ -25,6 +27,7 @@ ln -sfn /ruta/a/ssh-home/ssh-home ~/.local/bin/ssh-home
 - Resuelve `HostName`, `User`, `Port` y `ProxyJump` con `ssh -G`.
 - Reutiliza una conexión maestra temporal para evitar múltiples prompts de autenticación.
 - Abre una TUI estilo homelab/cockpit con favoritos, recientes, filtro al escribir y navegación hacia atrás.
+- Muestra un cockpit sobrio con logo `ssh://home`, metadata del host y mini gráfico de hosts.
 - Permite navegar directorios remotos antes de abrir la sesión final.
 - Sale de la TUI antes de lanzar `ssh`, para que el shell remoto ocupe el terminal normal.
 - Reutiliza la misma conexión autenticada del navegador remoto para abrir el shell final.
@@ -40,7 +43,7 @@ ln -sfn /ruta/a/ssh-home/ssh-home ~/.local/bin/ssh-home
 ## Uso
 
 ```bash
-./ssh-home
+ssh-home
 ```
 
 Alternativa equivalente:
@@ -97,6 +100,13 @@ python3 ssh-home.py --clear-history
    - `Tab`: volver a la lista de hosts
    - `q`: cancelar
 4. Se abre un shell remoto directamente dentro de la carpeta elegida.
+
+## Interfaz visual
+
+- En terminales amplias muestra lista de hosts, panel lateral con metadata y gráfico compacto.
+- En terminales medianas usa un panel compacto sin elementos que choquen.
+- En terminales pequeñas oculta logo/gráfico y deja una vista mínima usable.
+- Si `curses` no puede usar color, mantiene la misma navegación en monocromo.
 
 ## Estado local
 
