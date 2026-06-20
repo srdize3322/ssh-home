@@ -130,7 +130,7 @@ Inside the TUI, press `n` from the host list to add a new endpoint without leavi
 
 ## TUI Shortcuts
 
-The host metadata panel stays visible whenever there is enough room. On wide terminals it sits beside the host list; on narrower terminals it moves below the list instead of disappearing.
+The host metadata panel stays beside the host list whenever there is enough horizontal room. Only when the side panel would become too narrow, it moves below the list instead of disappearing.
 
 - `Up` / `Down`: move selection
 - `Enter`: open host, enter directory, or use current directory

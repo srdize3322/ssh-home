@@ -163,11 +163,11 @@ class TUILayout:
 def layout_for_size(height: int, width: int) -> TUILayout:
     safe_width = max(1, width)
     safe_height = max(1, height)
+    list_width = min(max(30, safe_width // 3), 52)
+    panel_x = list_width + 2
+    panel_width = max(0, safe_width - panel_x - 1)
 
-    if safe_width >= 100 and safe_height >= 22:
-        list_width = min(max(34, safe_width // 3), 52)
-        panel_x = list_width + 2
-        panel_width = max(0, safe_width - panel_x - 1)
+    if panel_width >= 34 and safe_height >= 16:
         return TUILayout(
             mode="full",
             height=safe_height,

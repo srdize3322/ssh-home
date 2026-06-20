@@ -425,7 +425,9 @@ class TUIHelperTests(unittest.TestCase):
 
     def test_layout_for_size_uses_responsive_breakpoints(self) -> None:
         full = ssh_home.layout_for_size(24, 120)
-        stacked = ssh_home.layout_for_size(24, 90)
+        narrow_side = ssh_home.layout_for_size(30, 80)
+        medium_side = ssh_home.layout_for_size(24, 90)
+        stacked = ssh_home.layout_for_size(24, 64)
         minimal = ssh_home.layout_for_size(16, 60)
 
         self.assertEqual(full.mode, "full")
@@ -434,6 +436,12 @@ class TUIHelperTests(unittest.TestCase):
         self.assertEqual(full.panel_position, "side")
         self.assertLessEqual(full.list_width, 52)
         self.assertLess(full.panel_x + full.panel_width, full.width)
+        self.assertEqual(narrow_side.mode, "full")
+        self.assertEqual(narrow_side.panel_position, "side")
+        self.assertGreaterEqual(narrow_side.panel_width, 34)
+        self.assertEqual(medium_side.mode, "full")
+        self.assertEqual(medium_side.panel_position, "side")
+        self.assertGreaterEqual(medium_side.panel_width, 34)
         self.assertEqual(stacked.mode, "stacked")
         self.assertTrue(stacked.show_panel)
         self.assertEqual(stacked.panel_position, "stack")
