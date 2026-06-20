@@ -425,18 +425,25 @@ class TUIHelperTests(unittest.TestCase):
 
     def test_layout_for_size_uses_responsive_breakpoints(self) -> None:
         full = ssh_home.layout_for_size(24, 120)
-        compact = ssh_home.layout_for_size(24, 90)
+        stacked = ssh_home.layout_for_size(24, 90)
         minimal = ssh_home.layout_for_size(16, 60)
 
         self.assertEqual(full.mode, "full")
         self.assertTrue(full.show_panel)
         self.assertTrue(full.show_graph)
+        self.assertEqual(full.panel_position, "side")
+        self.assertLessEqual(full.list_width, 52)
         self.assertLess(full.panel_x + full.panel_width, full.width)
-        self.assertEqual(compact.mode, "compact")
-        self.assertTrue(compact.show_panel)
-        self.assertFalse(compact.show_graph)
+        self.assertEqual(stacked.mode, "stacked")
+        self.assertTrue(stacked.show_panel)
+        self.assertEqual(stacked.panel_position, "stack")
+        self.assertEqual(stacked.panel_x, 0)
+        self.assertEqual(stacked.panel_width, stacked.width - 1)
+        self.assertLess(stacked.list_start, stacked.panel_y)
+        self.assertFalse(stacked.show_graph)
         self.assertEqual(minimal.mode, "minimal")
         self.assertFalse(minimal.show_panel)
+        self.assertEqual(minimal.panel_position, "none")
 
     def test_truncate_middle_keeps_edges_inside_width(self) -> None:
         value = ssh_home.truncate_middle("/srv/app/releases/current", 12)
@@ -473,6 +480,19 @@ class TUIHelperTests(unittest.TestCase):
         palette = ssh_home.init_curses_palette(NoColorCurses)
 
         self.assertEqual(palette, {name: 0 for name in ssh_home.TUI_COLOR_PAIR_IDS})
+
+    def test_restore_terminal_for_shell_writes_mouse_reset_only_to_tty(self) -> None:
+        tty = FakeTTY("")
+        pipe = PromptPipe("")
+
+        ssh_home.restore_terminal_for_shell(tty)
+        ssh_home.restore_terminal_for_shell(pipe)
+
+        written = "".join(tty.writes)
+        self.assertIn("\x1b[?1000l", written)
+        self.assertIn("\x1b[?1006l", written)
+        self.assertIn("\x1b[?1049l", written)
+        self.assertEqual(pipe.getvalue(), "")
 
 
 class PublicSafetyTests(unittest.TestCase):

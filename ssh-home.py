@@ -25,6 +25,17 @@ HOST_VIEW_ALL = "all"
 HOST_VIEW_FAVORITES = "favorites"
 HOST_VIEW_RECENTS = "recents"
 HOST_VIEWS = (HOST_VIEW_ALL, HOST_VIEW_FAVORITES, HOST_VIEW_RECENTS)
+TERMINAL_RESTORE_SEQUENCE = (
+    "\x1b[?25h"  # show cursor
+    "\x1b[?1l"  # normal cursor keys
+    "\x1b[?1000l"  # mouse click tracking off
+    "\x1b[?1002l"  # mouse drag tracking off
+    "\x1b[?1003l"  # mouse move tracking off
+    "\x1b[?1006l"  # SGR mouse mode off
+    "\x1b[?1015l"  # urxvt mouse mode off
+    "\x1b[?2004l"  # bracketed paste off
+    "\x1b[?1049l"  # leave alternate screen if it is still active
+)
 TUI_COLOR_PAIR_IDS = {
     "brand": 1,
     "accent": 2,
@@ -141,7 +152,9 @@ class TUILayout:
     list_start: int
     list_width: int
     panel_x: int
+    panel_y: int
     panel_width: int
+    panel_position: str
     show_panel: bool
     show_graph: bool
     show_logo: bool
@@ -152,7 +165,7 @@ def layout_for_size(height: int, width: int) -> TUILayout:
     safe_height = max(1, height)
 
     if safe_width >= 100 and safe_height >= 22:
-        list_width = max(34, min(int(safe_width * 0.56), safe_width - 36))
+        list_width = min(max(34, safe_width // 3), 52)
         panel_x = list_width + 2
         panel_width = max(0, safe_width - panel_x - 1)
         return TUILayout(
@@ -163,28 +176,30 @@ def layout_for_size(height: int, width: int) -> TUILayout:
             list_start=7,
             list_width=list_width,
             panel_x=panel_x,
+            panel_y=4,
             panel_width=panel_width,
-            show_panel=panel_width >= 28,
-            show_graph=panel_width >= 30,
+            panel_position="side",
+            show_panel=panel_width >= 34,
+            show_graph=panel_width >= 38,
             show_logo=True,
         )
 
-    if safe_width >= 72 and safe_height >= 18:
-        panel_width = 34 if safe_width >= 96 else 30 if safe_width >= 86 else 0
-        panel_x = max(0, safe_width - panel_width - 1) if panel_width else safe_width
-        list_width = panel_x - 2 if panel_width else safe_width - 1
+    if safe_width >= 58 and safe_height >= 20:
+        panel_y = max(12, safe_height - 11)
         return TUILayout(
-            mode="compact",
+            mode="stacked",
             height=safe_height,
             width=safe_width,
             header_rows=4,
             list_start=6,
-            list_width=max(28, list_width),
-            panel_x=panel_x,
-            panel_width=panel_width,
-            show_panel=panel_width >= 24,
+            list_width=safe_width - 1,
+            panel_x=0,
+            panel_y=panel_y,
+            panel_width=safe_width - 1,
+            panel_position="stack",
+            show_panel=True,
             show_graph=False,
-            show_logo=safe_width >= 86,
+            show_logo=False,
         )
 
     return TUILayout(
@@ -195,7 +210,9 @@ def layout_for_size(height: int, width: int) -> TUILayout:
         list_start=4,
         list_width=safe_width - 1,
         panel_x=safe_width,
+        panel_y=safe_height,
         panel_width=0,
+        panel_position="none",
         show_panel=False,
         show_graph=False,
         show_logo=False,
@@ -1313,7 +1330,7 @@ class SSHHomeTUI:
         resolved = self._resolved_host(selected)
         x = layout.panel_x
         width = layout.panel_width
-        row = 4 if layout.mode == "full" else 5
+        row = layout.panel_y
         self._draw(row, x, "SSH NODE", width, self._attr("brand", bold=True))
         self._draw(row + 1, x, resolved_endpoint_summary(resolved), width, self._attr("accent"))
         self._draw(row + 2, x, "project by srdize3322", width, self._attr("muted", dim=True))
@@ -1357,7 +1374,7 @@ class SSHHomeTUI:
             return
         x = layout.panel_x
         width = layout.panel_width
-        row = 4 if layout.mode == "full" else 5
+        row = layout.panel_y
         depth = len([part for part in current_path.split("/") if part])
         self._draw(row, x, "SESSION", width, self._attr("brand", bold=True))
         self._draw(row + 1, x, "ssh://home", width, self._attr("accent"))
@@ -1403,7 +1420,8 @@ class SSHHomeTUI:
             self._render_host_panel(layout, selected, counts)
 
         list_start = layout.list_start
-        visible_rows = max(0, height - list_start - 2)
+        list_bottom = layout.panel_y - 1 if layout.panel_position == "stack" else height - 2
+        visible_rows = max(0, list_bottom - list_start)
         offset = self._scroll_offset(self.host_index, len(hosts), visible_rows)
         if visible_rows <= 0:
             pass
@@ -1425,8 +1443,8 @@ class SSHHomeTUI:
                 self._draw(list_start + row, 0, label, layout.list_width, attr)
 
         if self.show_help:
-            help_x = layout.panel_x if layout.show_panel else max(0, width - 25)
-            help_width = layout.panel_width if layout.show_panel else min(24, width - 1)
+            help_x = layout.panel_x if layout.panel_position == "side" else max(0, width - 25)
+            help_width = layout.panel_width if layout.panel_position == "side" else min(24, width - 1)
             self._render_help_box(
                 [
                     "Enter open",
@@ -1480,7 +1498,8 @@ class SSHHomeTUI:
         self._render_directory_panel(layout, host, current_path)
 
         list_start = layout.list_start
-        visible_rows = max(0, height - list_start - 2)
+        list_bottom = layout.panel_y - 1 if layout.panel_position == "stack" else height - 2
+        visible_rows = max(0, list_bottom - list_start)
         offset = self._scroll_offset(self.dir_index, len(entries), visible_rows)
         if visible_rows > 0:
             for row, entry in enumerate(entries[offset : offset + visible_rows]):
@@ -1498,8 +1517,8 @@ class SSHHomeTUI:
                 self._draw(list_start + row, 0, label, layout.list_width, attr)
 
         if self.show_help:
-            help_x = layout.panel_x if layout.show_panel else max(0, width - 25)
-            help_width = layout.panel_width if layout.show_panel else min(24, width - 1)
+            help_x = layout.panel_x if layout.panel_position == "side" else max(0, width - 25)
+            help_width = layout.panel_width if layout.panel_position == "side" else min(24, width - 1)
             self._render_help_box(
                 [
                     "Enter open/use",
@@ -1727,6 +1746,17 @@ def can_use_tui() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty() and term not in ("", "dumb")
 
 
+def restore_terminal_for_shell(stdout: TextIO | None = None) -> None:
+    stream = stdout or sys.stdout
+    if not bool(getattr(stream, "isatty", lambda: False)()):
+        return
+    try:
+        stream.write(TERMINAL_RESTORE_SEQUENCE)
+        stream.flush()
+    except OSError:
+        return
+
+
 def run(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Gestor SSH interactivo y portable.")
     parser.add_argument("--list", action="store_true", help="Listar hosts detectados y salir.")
@@ -1861,6 +1891,7 @@ def run(argv: list[str] | None = None) -> int:
 
         session = final_session or SSHMasterSession(selected_host, effective_config)
         try:
+            restore_terminal_for_shell()
             exit_code = session.run_interactive(shell_command_for_path(target_path))
             state.record_connection(selected_host, target_path)
             state.save()

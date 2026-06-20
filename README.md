@@ -15,6 +15,7 @@ No secrets are bundled. No private inventory is read. Passwords and key prompts 
 - Add new SSH endpoints with `ssh-home --add` or the `n` shortcut in the TUI
 - Remote directory browser before opening the final shell
 - Clean terminal handoff: the TUI exits before the final SSH session starts
+- Terminal mode cleanup before SSH so mouse scrolling behaves normally in the shell
 - Local-only state for favorites, recents and last paths
 - Python stdlib only, no package install required
 
@@ -128,6 +129,8 @@ Inside the TUI, press `n` from the host list to add a new endpoint without leavi
 `ssh-home` appends a clean `Host` block to the config file selected by `--config` or `~/.ssh/config`. It does not store passwords.
 
 ## TUI Shortcuts
+
+The host metadata panel stays visible whenever there is enough room. On wide terminals it sits beside the host list; on narrower terminals it moves below the list instead of disappearing.
 
 - `Up` / `Down`: move selection
 - `Enter`: open host, enter directory, or use current directory
