@@ -4,6 +4,7 @@ import importlib.util
 import io
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -68,8 +69,8 @@ class ParseHostsTests(unittest.TestCase):
 
     def test_filter_candidates_is_case_insensitive(self) -> None:
         self.assertEqual(
-            ssh_home.filter_candidates(["Proxmox", "workspace", "Jelly"], "ox"),
-            ["Proxmox"],
+            ssh_home.filter_candidates(["Gateway", "workspace", "Jelly"], "way"),
+            ["Gateway"],
         )
 
     def test_parse_config_line_respects_quotes_and_comments(self) -> None:
@@ -94,6 +95,54 @@ class ResolutionTests(unittest.TestCase):
         self.assertEqual(resolved.user, "root")
         self.assertEqual(resolved.port, "22")
         self.assertEqual(resolved.proxyjump, "gateway")
+
+
+class StateTests(unittest.TestCase):
+    def test_state_load_creates_default_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "state.json"
+            state = ssh_home.SSHHomeState.load(state_path)
+            self.assertTrue(state_path.exists())
+            self.assertEqual(state.favorites, [])
+            self.assertEqual(state.preference("view", "bad"), ssh_home.HOST_VIEW_ALL)
+
+    def test_state_load_recovers_from_corrupt_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "state.json"
+            state_path.write_text("{not-json", encoding="utf-8")
+            state = ssh_home.SSHHomeState.load(state_path)
+            self.assertEqual(state.favorites, [])
+            self.assertEqual(state.recents, {})
+
+    def test_disabled_state_never_writes(self) -> None:
+        state = ssh_home.SSHHomeState.disabled()
+        state.toggle_favorite("app-prod")
+        state.record_connection("app-prod", "/srv/app")
+        state.save()
+        self.assertFalse(state.is_favorite("app-prod"))
+        self.assertIsNone(state.last_path("app-prod"))
+
+    def test_state_tracks_favorites_recents_and_history(self) -> None:
+        state = ssh_home.SSHHomeState(path=None, enabled=True)
+        self.assertTrue(state.toggle_favorite("app-prod"))
+        state.data["recents"] = {"app-stage": 10.0, "gateway": 20.0}
+        state.data["last_paths"] = {"app-stage": "/srv/stage", "gateway": "/srv/gateway"}
+        ordered = ssh_home.ordered_hosts(
+            ["gateway", "app-stage", "app-prod", "nested-a"],
+            state,
+            ssh_home.HOST_VIEW_ALL,
+        )
+        self.assertEqual(ordered[:3], ["app-prod", "gateway", "app-stage"])
+        self.assertEqual(state.last_path("app-stage"), "/srv/stage")
+
+    def test_clear_history_keeps_favorites(self) -> None:
+        state = ssh_home.SSHHomeState(path=None, enabled=True)
+        state.toggle_favorite("app-prod")
+        state.record_connection("app-prod", "/srv/app")
+        state.clear_history()
+        self.assertTrue(state.is_favorite("app-prod"))
+        self.assertEqual(state.recents, {})
+        self.assertIsNone(state.last_path("app-prod"))
 
 
 class PromptIOTests(unittest.TestCase):
@@ -210,7 +259,7 @@ class CLIListingTests(unittest.TestCase):
     def test_run_list_outputs_hosts(self) -> None:
         config_path = REPO_ROOT / "tests" / "fixtures" / "ssh_config"
         with mock.patch("sys.stdout", new=io.StringIO()) as buffer:
-            exit_code = ssh_home.run(["--list", "--config", str(config_path)])
+            exit_code = ssh_home.run(["--list", "--no-state", "--config", str(config_path)])
         self.assertEqual(exit_code, 0)
         self.assertIn("app-prod", buffer.getvalue())
 
@@ -249,6 +298,7 @@ class CLIListingTests(unittest.TestCase):
                         "/srv/app",
                         "--config",
                         str(config_path),
+                        "--no-state",
                     ]
                 )
 
@@ -257,12 +307,62 @@ class CLIListingTests(unittest.TestCase):
         self.assertIn("/srv/app", instances[0].remote_script)
         self.assertTrue(instances[0].closed)
 
+    def test_clear_history_flag_preserves_favorites(self) -> None:
+        config_path = REPO_ROOT / "tests" / "fixtures" / "ssh_config"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "state.json"
+            state = ssh_home.SSHHomeState.load(state_path)
+            state.toggle_favorite("app-prod")
+            state.record_connection("app-prod", "/srv/app")
+            state.save()
+
+            with mock.patch("sys.stdout", new=io.StringIO()):
+                exit_code = ssh_home.run(
+                    [
+                        "--list",
+                        "--config",
+                        str(config_path),
+                        "--state-file",
+                        str(state_path),
+                        "--clear-history",
+                    ]
+                )
+
+            reloaded = ssh_home.SSHHomeState.load(state_path)
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(reloaded.is_favorite("app-prod"))
+            self.assertEqual(reloaded.recents, {})
+            self.assertIsNone(reloaded.last_path("app-prod"))
+
 
 class TUIHelperTests(unittest.TestCase):
     def test_is_enter_accepts_newline_string(self) -> None:
         ui = object.__new__(ssh_home.SSHHomeTUI)
         self.assertTrue(ui._is_enter("\n"))
         self.assertTrue(ui._is_enter("\r"))
+
+
+class PublicSafetyTests(unittest.TestCase):
+    def test_repo_files_do_not_include_private_markers(self) -> None:
+        forbidden = [
+            "/Users/" + "santiago",
+            "192." + "168.",
+            "100." + "111.",
+            "OPEN" + "ROUTER",
+            "MINI" + "MAX",
+            "API" + "_KEY",
+            "TOK" + "EN",
+            "SEC" + "RET",
+            "prox" + "mox",
+            "her" + "mes",
+            "n" + "8n",
+        ]
+        for path in REPO_ROOT.rglob("*"):
+            if path.is_dir() or ".git" in path.parts or "__pycache__" in path.parts:
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            for marker in forbidden:
+                self.assertNotIn(marker, text, f"{marker!r} leaked in {path}")
 
 
 if __name__ == "__main__":

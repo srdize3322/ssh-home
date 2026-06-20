@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import json
 import os
 import posixpath
 import shlex
@@ -19,6 +20,11 @@ from typing import Callable, Iterable, TextIO
 
 LIST_SPLIT_MARKER = "__SSH_HOME_DIRS__"
 CONTROL_PERSIST_SECONDS = 600
+STATE_VERSION = 1
+HOST_VIEW_ALL = "all"
+HOST_VIEW_FAVORITES = "favorites"
+HOST_VIEW_RECENTS = "recents"
+HOST_VIEWS = (HOST_VIEW_ALL, HOST_VIEW_FAVORITES, HOST_VIEW_RECENTS)
 
 
 class SSHHomeError(Exception):
@@ -116,6 +122,136 @@ class TUISelection:
     session: "SSHMasterSession"
 
 
+def default_state_path() -> Path:
+    config_home = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(config_home).expanduser() if config_home else Path("~/.config").expanduser()
+    return base / "ssh-home" / "state.json"
+
+
+def empty_state_data() -> dict:
+    return {
+        "version": STATE_VERSION,
+        "favorites": [],
+        "recents": {},
+        "last_paths": {},
+        "preferences": {"view": HOST_VIEW_ALL},
+    }
+
+
+def normalize_state_data(raw: object) -> dict:
+    data = empty_state_data()
+    if not isinstance(raw, dict):
+        return data
+
+    favorites = raw.get("favorites", [])
+    if isinstance(favorites, list):
+        data["favorites"] = unique_preserving_order(
+            item for item in favorites if isinstance(item, str) and item
+        )
+
+    recents = raw.get("recents", {})
+    if isinstance(recents, dict):
+        data["recents"] = {
+            key: float(value)
+            for key, value in recents.items()
+            if isinstance(key, str) and key and isinstance(value, (int, float))
+        }
+
+    last_paths = raw.get("last_paths", {})
+    if isinstance(last_paths, dict):
+        data["last_paths"] = {
+            key: value
+            for key, value in last_paths.items()
+            if isinstance(key, str) and key and isinstance(value, str) and value
+        }
+
+    preferences = raw.get("preferences", {})
+    if isinstance(preferences, dict):
+        view = preferences.get("view", HOST_VIEW_ALL)
+        data["preferences"]["view"] = view if view in HOST_VIEWS else HOST_VIEW_ALL
+
+    return data
+
+
+class SSHHomeState:
+    def __init__(self, path: Path | None, enabled: bool = True, data: dict | None = None) -> None:
+        self.path = path
+        self.enabled = enabled
+        self.data = normalize_state_data(data or {})
+
+    @classmethod
+    def disabled(cls) -> "SSHHomeState":
+        return cls(path=None, enabled=False, data=empty_state_data())
+
+    @classmethod
+    def load(cls, path: Path) -> "SSHHomeState":
+        expanded = Path(os.path.expanduser(os.path.expandvars(str(path))))
+        raw: object = {}
+        if expanded.exists():
+            try:
+                raw = json.loads(expanded.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                raw = {}
+        state = cls(path=expanded, enabled=True, data=normalize_state_data(raw))
+        state.save()
+        return state
+
+    @property
+    def favorites(self) -> list[str]:
+        return list(self.data["favorites"])
+
+    @property
+    def recents(self) -> dict[str, float]:
+        return dict(self.data["recents"])
+
+    def preference(self, key: str, default: str) -> str:
+        value = self.data["preferences"].get(key, default)
+        return value if isinstance(value, str) else default
+
+    def set_preference(self, key: str, value: str) -> None:
+        if not self.enabled:
+            return
+        self.data["preferences"][key] = value
+
+    def is_favorite(self, host: str) -> bool:
+        return host in self.data["favorites"]
+
+    def toggle_favorite(self, host: str) -> bool:
+        if not self.enabled:
+            return False
+        favorites = self.data["favorites"]
+        if host in favorites:
+            favorites.remove(host)
+            return False
+        favorites.append(host)
+        return True
+
+    def last_path(self, host: str) -> str | None:
+        value = self.data["last_paths"].get(host)
+        return value if isinstance(value, str) and value else None
+
+    def record_connection(self, host: str, path: str) -> None:
+        if not self.enabled:
+            return
+        self.data["recents"][host] = time.time()
+        self.data["last_paths"][host] = path
+
+    def clear_history(self) -> None:
+        if not self.enabled:
+            return
+        self.data["recents"] = {}
+        self.data["last_paths"] = {}
+
+    def save(self) -> None:
+        if not self.enabled or self.path is None:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(
+            json.dumps(self.data, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+
 def parse_config_line(raw_line: str) -> list[str]:
     try:
         return shlex.split(raw_line, comments=True, posix=True)
@@ -142,6 +278,70 @@ def filter_candidates(items: list[str], query: str) -> list[str]:
         return items
     lowered = query.casefold()
     return [item for item in items if lowered in item.casefold()]
+
+
+def recent_hosts(hosts: list[str], state: SSHHomeState) -> list[str]:
+    known_hosts = set(hosts)
+    return [
+        host
+        for host, _timestamp in sorted(
+            state.recents.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        if host in known_hosts
+    ]
+
+
+def favorite_hosts(hosts: list[str], state: SSHHomeState) -> list[str]:
+    known_hosts = set(hosts)
+    return [host for host in state.favorites if host in known_hosts]
+
+
+def ordered_hosts(hosts: list[str], state: SSHHomeState, view: str = HOST_VIEW_ALL) -> list[str]:
+    favorites = favorite_hosts(hosts, state)
+    recents = recent_hosts(hosts, state)
+    if view == HOST_VIEW_FAVORITES:
+        return favorites
+    if view == HOST_VIEW_RECENTS:
+        return recents
+
+    pinned = set(favorites) | set(recents)
+    rest = sorted((host for host in hosts if host not in pinned), key=str.casefold)
+    return favorites + [host for host in recents if host not in favorites] + rest
+
+
+def host_group(host: str, state: SSHHomeState) -> str:
+    if state.is_favorite(host):
+        return "favorite"
+    if host in state.recents:
+        return "recent"
+    return "host"
+
+
+def next_host_view(view: str) -> str:
+    if view not in HOST_VIEWS:
+        return HOST_VIEW_ALL
+    index = HOST_VIEWS.index(view)
+    return HOST_VIEWS[(index + 1) % len(HOST_VIEWS)]
+
+
+def host_view_label(view: str) -> str:
+    return {
+        HOST_VIEW_ALL: "ALL",
+        HOST_VIEW_FAVORITES: "FAV",
+        HOST_VIEW_RECENTS: "RECENT",
+    }.get(view, "ALL")
+
+
+def breadcrumb_path(path: str, max_parts: int = 4) -> str:
+    normalized = posixpath.normpath(path or "/")
+    if normalized == "/":
+        return "/"
+    parts = [part for part in normalized.split("/") if part]
+    if len(parts) <= max_parts:
+        return "/" + " / ".join(parts)
+    return "... / " + " / ".join(parts[-max_parts:])
 
 
 def iter_ssh_config_files(config_path: Path) -> list[Path]:
@@ -361,33 +561,45 @@ class SSHHomeTUI:
         stdscr,
         hosts: list[str],
         config_path: Path,
+        state: SSHHomeState,
         initial_host: str | None = None,
         initial_path: str | None = None,
     ) -> None:
         self.stdscr = stdscr
         self.hosts = hosts
         self.config_path = config_path
+        self.state = state
         self.initial_host = initial_host
         self.initial_path = initial_path
         self.host_query = ""
         self.host_index = 0
         self.dir_query = ""
         self.dir_index = 0
+        self.host_view = self.state.preference("view", HOST_VIEW_ALL)
+        self.selected_start_path: str | None = None
+        self.show_help = False
+        self.status_message = "Ready"
         self.resolved_cache: dict[str, ResolvedHost] = {}
 
     def run(self) -> TUISelection:
-        host = self.initial_host or self._select_host()
-        pending_path = self.initial_path
+        if self.initial_host:
+            host = self.initial_host
+            pending_path = self.initial_path
+        else:
+            host = self._select_host()
+            pending_path = self.selected_start_path
         while True:
             try:
                 return self._browse_host(host, pending_path)
             except ChangeHostRequested:
                 host = self._select_host()
-                pending_path = None
+                pending_path = self.selected_start_path
 
     def _select_host(self) -> str:
+        self.selected_start_path = None
         while True:
-            filtered = filter_candidates(self.hosts, self.host_query)
+            ordered = ordered_hosts(self.hosts, self.state, self.host_view)
+            filtered = filter_candidates(ordered, self.host_query)
             self.host_index = self._clamp_index(self.host_index, len(filtered))
             selected = filtered[self.host_index] if filtered else None
             self._render_host_screen(filtered, selected)
@@ -395,12 +607,59 @@ class SSHHomeTUI:
 
             if key in ("q", "Q"):
                 raise SSHHomeError("Conexión cancelada por el usuario.")
+            if key == "?":
+                self.show_help = not self.show_help
+                continue
+            if key in ("\t",) and not self.host_query:
+                self.host_view = next_host_view(self.host_view)
+                self.state.set_preference("view", self.host_view)
+                self.state.save()
+                self.host_index = 0
+                self.status_message = f"View: {host_view_label(self.host_view)}"
+                continue
             if key in ("\t",):
                 self.host_query = ""
                 self.host_index = 0
                 continue
+            if not self.host_query and key in ("a", "A"):
+                self.host_view = HOST_VIEW_ALL
+                self.state.set_preference("view", self.host_view)
+                self.state.save()
+                self.host_index = 0
+                self.status_message = "Showing all hosts"
+                continue
+            if not self.host_query and key in ("r", "R"):
+                self.host_view = HOST_VIEW_RECENTS
+                self.state.set_preference("view", self.host_view)
+                self.state.save()
+                self.host_index = 0
+                self.status_message = "Showing recent hosts"
+                continue
+            if not self.host_query and key in ("f", "F"):
+                if selected is not None:
+                    if not self.state.enabled:
+                        self.status_message = "State disabled (--no-state)"
+                        continue
+                    is_favorite = self.state.toggle_favorite(selected)
+                    self.state.save()
+                    self.status_message = (
+                        f"Favorited {selected}" if is_favorite else f"Unfavorited {selected}"
+                    )
+                continue
+            if not self.host_query and key in ("l", "L"):
+                if selected is None:
+                    continue
+                last_path = self.state.last_path(selected)
+                if last_path:
+                    self.selected_start_path = last_path
+                    self.dir_query = ""
+                    self.dir_index = 0
+                    return selected
+                self.status_message = f"No last path for {selected}"
+                continue
             if self._is_enter(key):
                 if selected is not None:
+                    self.selected_start_path = None
                     self.dir_query = ""
                     self.dir_index = 0
                     return selected
@@ -424,10 +683,13 @@ class SSHHomeTUI:
         session = SSHMasterSession(host, self.config_path)
         keep_session = False
         try:
+            self.status_message = f"Connecting to {host}..."
             self._run_in_shell_mode(session.establish)
+            self.status_message = "Loading remote directories..."
             current_path, directories = list_remote_directories(session, start_path)
             self.dir_query = ""
             self.dir_index = 0
+            self.status_message = f"Connected to {host}"
 
             while True:
                 filtered = filter_candidates(directories, self.dir_query)
@@ -438,8 +700,37 @@ class SSHHomeTUI:
 
                 if key in ("q", "Q"):
                     raise SSHHomeError("Conexión cancelada por el usuario.")
+                if key == "?":
+                    self.show_help = not self.show_help
+                    continue
                 if key in ("\t", "h", "H"):
                     raise ChangeHostRequested()
+                if key in ("f", "F") and not self.dir_query:
+                    if not self.state.enabled:
+                        self.status_message = "State disabled (--no-state)"
+                        continue
+                    is_favorite = self.state.toggle_favorite(host)
+                    self.state.save()
+                    self.status_message = (
+                        f"Favorited {host}" if is_favorite else f"Unfavorited {host}"
+                    )
+                    continue
+                if key in ("r", "R") and not self.dir_query:
+                    self.status_message = "Refreshing remote directory..."
+                    current_path, directories = list_remote_directories(session, current_path)
+                    self.dir_index = 0
+                    self.status_message = "Directory refreshed"
+                    continue
+                if key in ("l", "L") and not self.dir_query:
+                    last_path = self.state.last_path(host)
+                    if last_path:
+                        current_path, directories = list_remote_directories(session, last_path)
+                        self.dir_query = ""
+                        self.dir_index = 0
+                        self.status_message = f"Jumped to last path: {last_path}"
+                    else:
+                        self.status_message = f"No last path for {host}"
+                    continue
                 if key == self._curses.KEY_LEFT:
                     current_path, directories = list_remote_directories(
                         session,
@@ -447,6 +738,7 @@ class SSHHomeTUI:
                     )
                     self.dir_query = ""
                     self.dir_index = 0
+                    self.status_message = "Moved up one level"
                     continue
                 if key in ("/", "m", "M"):
                     manual = self._prompt_line(
@@ -461,6 +753,7 @@ class SSHHomeTUI:
                     current_path, directories = list_remote_directories(session, candidate)
                     self.dir_query = ""
                     self.dir_index = 0
+                    self.status_message = f"Opened {candidate}"
                     continue
                 if key == self._curses.KEY_UP:
                     self.dir_index = max(0, self.dir_index - 1)
@@ -491,6 +784,7 @@ class SSHHomeTUI:
                         )
                         self.dir_query = ""
                         self.dir_index = 0
+                        self.status_message = "Moved up one level"
                         continue
                     if entry_type == "manual":
                         manual = self._prompt_line(
@@ -505,6 +799,7 @@ class SSHHomeTUI:
                         current_path, directories = list_remote_directories(session, candidate)
                         self.dir_query = ""
                         self.dir_index = 0
+                        self.status_message = f"Opened {candidate}"
                         continue
                     if entry_type == "hosts":
                         raise ChangeHostRequested()
@@ -512,6 +807,7 @@ class SSHHomeTUI:
                     current_path, directories = list_remote_directories(session, next_path)
                     self.dir_query = ""
                     self.dir_index = 0
+                    self.status_message = f"Opened {next_path}"
                     continue
                 if isinstance(key, str) and key.isprintable():
                     self.dir_query += key
@@ -567,34 +863,68 @@ class SSHHomeTUI:
         curses = self._curses
         self.stdscr.erase()
         height, width = self.stdscr.getmaxyx()
-        self.stdscr.addnstr(0, 0, "ssh-home", width - 1, curses.A_BOLD)
-        self.stdscr.addnstr(
-            1,
-            0,
-            "Selecciona un host SSH. Escribe para filtrar.",
-            width - 1,
+        list_width = max(28, min(width - 2, int(width * 0.58)))
+        panel_x = list_width + 2
+        panel_width = max(0, width - panel_x - 1)
+        title = f"ssh-home  HOMELAB PRO  [{host_view_label(self.host_view)}]"
+        stats = (
+            f"hosts {len(self.hosts)} | fav {len(favorite_hosts(self.hosts, self.state))} | "
+            f"recent {len(recent_hosts(self.hosts, self.state))}"
         )
-        self.stdscr.addnstr(3, 0, f"Filtro: {self.host_query or '(sin filtro)'}", width - 1)
-        self.stdscr.addnstr(4, 0, f"Hosts visibles: {len(hosts)}", width - 1)
+        self.stdscr.addnstr(0, 0, title, width - 1, curses.A_BOLD)
+        self.stdscr.addnstr(1, 0, stats, width - 1, curses.A_DIM)
+        self.stdscr.addnstr(3, 0, f"Filter: {self.host_query or 'none'}", list_width, curses.A_BOLD)
+        self.stdscr.addnstr(4, 0, f"Visible: {len(hosts)}", list_width, curses.A_DIM)
 
-        details_start = 6
+        details_start = 3
         if selected is not None:
             resolved = self._resolved_host(selected)
-            self.stdscr.addnstr(details_start, 0, f"Alias: {resolved.alias}", width - 1)
-            self.stdscr.addnstr(details_start + 1, 0, f"HostName: {resolved.hostname or '-'}", width - 1)
-            self.stdscr.addnstr(details_start + 2, 0, f"User: {resolved.user or '-'}", width - 1)
-            self.stdscr.addnstr(details_start + 3, 0, f"Port: {resolved.port or '-'}", width - 1)
-            self.stdscr.addnstr(details_start + 4, 0, f"ProxyJump: {resolved.proxyjump or '-'}", width - 1)
+            if panel_width > 12:
+                self.stdscr.addnstr(3, panel_x, "HOST", panel_width, curses.A_BOLD)
+                self.stdscr.addnstr(details_start + 2, panel_x, f"Alias      {resolved.alias}", panel_width)
+                self.stdscr.addnstr(details_start + 3, panel_x, f"User       {resolved.user or '-'}", panel_width)
+                self.stdscr.addnstr(details_start + 4, panel_x, f"HostName   {resolved.hostname or '-'}", panel_width)
+                self.stdscr.addnstr(details_start + 5, panel_x, f"Port       {resolved.port or '-'}", panel_width)
+                self.stdscr.addnstr(details_start + 6, panel_x, f"ProxyJump  {resolved.proxyjump or '-'}", panel_width)
+                self.stdscr.addnstr(
+                    details_start + 8,
+                    panel_x,
+                    f"Favorite   {'yes' if self.state.is_favorite(selected) else 'no'}",
+                    panel_width,
+                )
+                self.stdscr.addnstr(
+                    details_start + 9,
+                    panel_x,
+                    f"Last path  {self.state.last_path(selected) or '-'}",
+                    panel_width,
+                )
 
-        list_start = details_start + 6
+        list_start = 6
         visible_rows = max(3, height - list_start - 2)
         offset = self._scroll_offset(self.host_index, len(hosts), visible_rows)
         for row, host in enumerate(hosts[offset : offset + visible_rows]):
             index = offset + row
             attr = curses.A_REVERSE if index == self.host_index else curses.A_NORMAL
-            self.stdscr.addnstr(list_start + row, 0, host, width - 1, attr)
+            label = self._label_for_host(host)
+            self.stdscr.addnstr(list_start + row, 0, label, list_width, attr)
 
-        footer = "Up/Down move | Enter select | Type filter | Backspace erase | Tab clear | q quit"
+        if self.show_help:
+            self._render_help_box(
+                [
+                    "Enter open",
+                    "f favorite",
+                    "l last path",
+                    "r recents",
+                    "a all",
+                    "Tab view",
+                    "q quit",
+                ],
+                panel_x,
+                height,
+                panel_width,
+            )
+
+        footer = f"{self.status_message} | ? help | Enter open | f fav | l last | r recent | a all | Tab view | q"
         self.stdscr.addnstr(height - 1, 0, footer, width - 1, curses.A_DIM)
         self.stdscr.refresh()
 
@@ -607,9 +937,9 @@ class SSHHomeTUI:
         curses = self._curses
         self.stdscr.erase()
         height, width = self.stdscr.getmaxyx()
-        self.stdscr.addnstr(0, 0, f"ssh-home :: {host}", width - 1, curses.A_BOLD)
-        self.stdscr.addnstr(1, 0, f"Ruta actual: {current_path}", width - 1)
-        self.stdscr.addnstr(3, 0, f"Filtro: {self.dir_query or '(sin filtro)'}", width - 1)
+        self.stdscr.addnstr(0, 0, f"ssh-home  {host}", width - 1, curses.A_BOLD)
+        self.stdscr.addnstr(1, 0, f"Path: {breadcrumb_path(current_path)}", width - 1)
+        self.stdscr.addnstr(3, 0, f"Filter: {self.dir_query or 'none'}", width - 1, curses.A_BOLD)
 
         list_start = 5
         visible_rows = max(3, height - list_start - 2)
@@ -621,12 +951,44 @@ class SSHHomeTUI:
             label = self._label_for_directory_entry(entry_type, value)
             self.stdscr.addnstr(list_start + row, 0, label, width - 1, attr)
 
+        if self.show_help:
+            self._render_help_box(
+                [
+                    "Enter open/use",
+                    "Left up",
+                    "/ manual path",
+                    "l last path",
+                    "r refresh",
+                    "f favorite host",
+                    "Tab hosts",
+                    "q quit",
+                ],
+                max(0, width - 24),
+                height,
+                min(23, width - 1),
+            )
+
         footer = (
-            "Up/Down move | Enter open/use | Left/backspace up | / manual path | "
-            "Tab host list | Type filter | q quit"
+            f"{self.status_message} | ? help | Enter open/use | Left up | / path | "
+            "l last | r refresh | Tab hosts | q"
         )
         self.stdscr.addnstr(height - 1, 0, footer, width - 1, curses.A_DIM)
         self.stdscr.refresh()
+
+    def _render_help_box(self, lines: list[str], x: int, height: int, width: int) -> None:
+        if width < 12 or x >= self.stdscr.getmaxyx()[1] - 1:
+            return
+        start_y = max(3, height - len(lines) - 4)
+        self.stdscr.addnstr(start_y, x, "HELP", width, self._curses.A_BOLD)
+        for index, line in enumerate(lines, start=1):
+            self.stdscr.addnstr(start_y + index, x, line, width)
+
+    def _label_for_host(self, host: str) -> str:
+        group = host_group(host, self.state)
+        marker = {"favorite": "*", "recent": "~", "host": " "}[group]
+        last_path = self.state.last_path(host)
+        suffix = f"  {last_path}" if last_path else ""
+        return f"{marker} {host}{suffix}"
 
     def _directory_entries(self, current_path: str, directories: list[str]) -> list[tuple[str, str]]:
         return [
@@ -639,14 +1001,14 @@ class SSHHomeTUI:
 
     def _label_for_directory_entry(self, entry_type: str, value: str) -> str:
         if entry_type == "use":
-            return f"[usar esta carpeta] {value}"
+            return f"> use current  {value}"
         if entry_type == "parent":
-            return "[subir un nivel] .."
+            return "< parent      .."
         if entry_type == "manual":
-            return "[escribir ruta manual]"
+            return "/ manual path"
         if entry_type == "hosts":
-            return "[volver a hosts]"
-        return value
+            return "tab host list"
+        return f"  {value}"
 
     def _resolved_host(self, alias: str) -> ResolvedHost:
         if alias not in self.resolved_cache:
@@ -676,6 +1038,7 @@ class SSHHomeTUI:
 def run_tui(
     hosts: list[str],
     config_path: Path,
+    state: SSHHomeState,
     initial_host: str | None = None,
     initial_path: str | None = None,
 ) -> TUISelection:
@@ -685,7 +1048,14 @@ def run_tui(
         curses.curs_set(0)
         stdscr.keypad(True)
         stdscr.timeout(-1)
-        ui = SSHHomeTUI(stdscr, hosts, config_path, initial_host=initial_host, initial_path=initial_path)
+        ui = SSHHomeTUI(
+            stdscr,
+            hosts,
+            config_path,
+            state,
+            initial_host=initial_host,
+            initial_path=initial_path,
+        )
         return ui.run()
 
     return curses.wrapper(wrapped)
@@ -826,7 +1196,30 @@ def run(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Usar el modo texto simple aunque la TUI esté disponible.",
     )
+    parser.add_argument(
+        "--state-file",
+        default=None,
+        help="Ruta alternativa para el estado local (default: ~/.config/ssh-home/state.json).",
+    )
+    parser.add_argument(
+        "--no-state",
+        action="store_true",
+        help="No leer ni escribir favoritos, recientes o últimas rutas.",
+    )
+    parser.add_argument(
+        "--clear-history",
+        action="store_true",
+        help="Borrar recientes y últimas rutas sin tocar favoritos.",
+    )
     args = parser.parse_args(argv)
+
+    state = SSHHomeState.disabled()
+    if not args.no_state:
+        state_path = Path(args.state_file) if args.state_file else default_state_path()
+        state = SSHHomeState.load(state_path)
+        if args.clear_history:
+            state.clear_history()
+            state.save()
 
     config_path = Path(os.path.expanduser(args.config)).resolve()
     if not config_path.is_file():
@@ -843,7 +1236,7 @@ def run(argv: list[str] | None = None) -> int:
     with EffectiveSSHConfig(config_path) as effective_config:
         final_session: SSHMasterSession | None = None
         if can_use_tui() and not args.no_tui and args.path is None:
-            selection = run_tui(hosts, effective_config, initial_host=args.host)
+            selection = run_tui(hosts, effective_config, state, initial_host=args.host)
             selected_host = selection.host
             target_path = selection.path
             final_session = selection.session
@@ -853,7 +1246,10 @@ def run(argv: list[str] | None = None) -> int:
                 selected_host = args.host
             else:
                 io = PromptIO()
-                selected_host = choose_host_interactively(hosts, io)
+                selected_host = choose_host_interactively(
+                    ordered_hosts(hosts, state, HOST_VIEW_ALL),
+                    io,
+                )
             if args.show_resolved:
                 resolved = _resolve_host_from_effective_config(selected_host, effective_config)
                 print("")
@@ -877,7 +1273,10 @@ def run(argv: list[str] | None = None) -> int:
 
         session = final_session or SSHMasterSession(selected_host, effective_config)
         try:
-            return session.run_interactive(shell_command_for_path(target_path))
+            exit_code = session.run_interactive(shell_command_for_path(target_path))
+            state.record_connection(selected_host, target_path)
+            state.save()
+            return exit_code
         finally:
             session.close()
 

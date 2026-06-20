@@ -24,10 +24,11 @@ ln -sfn /ruta/a/ssh-home/ssh-home ~/.local/bin/ssh-home
 - Ignora entradas globales o wildcard como `Host *` y `Host jump-*`.
 - Resuelve `HostName`, `User`, `Port` y `ProxyJump` con `ssh -G`.
 - Reutiliza una conexión maestra temporal para evitar múltiples prompts de autenticación.
-- Abre una TUI interactiva con flechas, filtro al escribir y navegación hacia atrás.
+- Abre una TUI estilo homelab/cockpit con favoritos, recientes, filtro al escribir y navegación hacia atrás.
 - Permite navegar directorios remotos antes de abrir la sesión final.
 - Sale de la TUI antes de lanzar `ssh`, para que el shell remoto ocupe el terminal normal.
 - Reutiliza la misma conexión autenticada del navegador remoto para abrir el shell final.
+- Guarda favoritos, recientes y última ruta por host en estado local privado.
 - Soporta ejecución interactiva incluso cuando el script llega por `curl | python3 -`.
 
 ## Requisitos
@@ -58,6 +59,9 @@ Flags disponibles:
 ./ssh-home --config ~/.ssh/config
 ./ssh-home --host app-prod --show-resolved
 ./ssh-home --no-tui
+./ssh-home --state-file /tmp/ssh-home-state.json
+./ssh-home --no-state
+./ssh-home --clear-history
 ```
 
 Equivalentes con Python explícito:
@@ -70,6 +74,9 @@ python3 ssh-home.py --host app-prod --path /srv/app/current
 python3 ssh-home.py --config ~/.ssh/config
 python3 ssh-home.py --host app-prod --show-resolved
 python3 ssh-home.py --no-tui
+python3 ssh-home.py --state-file /tmp/ssh-home-state.json
+python3 ssh-home.py --no-state
+python3 ssh-home.py --clear-history
 ```
 
 ## Flujo interactivo
@@ -82,22 +89,53 @@ python3 ssh-home.py --no-tui
    - `Left` o `Backspace`: subir un nivel
    - escribir: filtrar directorios visibles
    - `/`: escribir una ruta manual
+   - `f`: marcar o desmarcar favorito
+   - `l`: saltar a la última ruta usada en el host
+   - `r`: ver recientes en hosts o refrescar directorio remoto
+   - `a`: volver a todos los hosts
+   - `?`: mostrar ayuda compacta
    - `Tab`: volver a la lista de hosts
    - `q`: cancelar
 4. Se abre un shell remoto directamente dentro de la carpeta elegida.
 
-## Ejecución vía curl
+## Estado local
 
-Reemplaza la URL por la raw URL real de tu repo pública cuando la publiques:
+Por defecto `ssh-home` guarda estado local en:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/tu-usuario/ssh-home/main/ssh-home.py | python3 -
+~/.config/ssh-home/state.json
+```
+
+Ese archivo puede contener aliases SSH, favoritos, recientes y últimas rutas remotas. No guarda contraseñas, llaves, IPs resueltas ni variables de entorno.
+
+Para usar otro archivo:
+
+```bash
+ssh-home --state-file /tmp/ssh-home-state.json
+```
+
+Para desactivar el estado:
+
+```bash
+ssh-home --no-state
+```
+
+Para limpiar recientes y últimas rutas sin borrar favoritos:
+
+```bash
+ssh-home --clear-history
+```
+
+## Ejecución vía curl
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/srdize3322/ssh-home/main/ssh-home.py | python3 -
 ```
 
 También puedes descargarlo y ejecutarlo localmente:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/tu-usuario/ssh-home/main/ssh-home.py -o /tmp/ssh-home.py
+curl -fsSL https://raw.githubusercontent.com/srdize3322/ssh-home/main/ssh-home.py -o /tmp/ssh-home.py
 python3 /tmp/ssh-home.py
 ```
 
@@ -107,6 +145,7 @@ python3 /tmp/ssh-home.py
 - Solo usa información que ya existe en la config SSH del equipo actual.
 - La autenticación sigue ocurriendo en el binario `ssh` del sistema.
 - El socket de control vive en `/tmp` y se limpia al salir.
+- El estado local es privado del equipo y nunca forma parte de la repo.
 
 ## Desarrollo
 
