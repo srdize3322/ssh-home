@@ -49,6 +49,17 @@ class ResolvedHost:
     user: str
     port: str
     proxyjump: str
+    identityfile: str = ""
+
+
+@dataclass
+class SSHHostEntry:
+    alias: str
+    hostname: str
+    user: str = ""
+    port: str = ""
+    proxyjump: str = ""
+    identity_file: str = ""
 
 
 class PromptIO:
@@ -107,15 +118,7 @@ class EffectiveSSHConfig:
         self.path = Path(self.temp_dir.name) / "config"
 
     def __enter__(self) -> Path:
-        parts: list[str] = []
-        for file_path in iter_ssh_config_files(self.source_path):
-            parts.append(f"# Source: {file_path}\n")
-            for raw_line in file_path.read_text(encoding="utf-8").splitlines():
-                tokens = parse_config_line(raw_line)
-                if tokens and tokens[0].lower() == "include":
-                    continue
-                parts.append(f"{raw_line}\n")
-        self.path.write_text("".join(parts), encoding="utf-8")
+        write_effective_ssh_config(self.source_path, self.path)
         return self.path
 
     def __exit__(self, exc_type, exc, tb) -> None:
@@ -167,7 +170,7 @@ def layout_for_size(height: int, width: int) -> TUILayout:
         )
 
     if safe_width >= 72 and safe_height >= 18:
-        panel_width = 26 if safe_width >= 86 else 0
+        panel_width = 34 if safe_width >= 96 else 30 if safe_width >= 86 else 0
         panel_x = max(0, safe_width - panel_width - 1) if panel_width else safe_width
         list_width = panel_x - 2 if panel_width else safe_width - 1
         return TUILayout(
@@ -238,6 +241,18 @@ def host_group_counts(hosts: list[str], state: "SSHHomeState") -> dict[str, int]
     }
 
 
+def resolved_endpoint_summary(resolved: ResolvedHost) -> str:
+    destination = resolved.hostname or resolved.alias
+    if resolved.user:
+        destination = f"{resolved.user}@{destination}"
+    parts = [f"ssh {resolved.alias}", destination]
+    if resolved.port:
+        parts.append(f"-p {resolved.port}")
+    if resolved.proxyjump:
+        parts.append(f"via {resolved.proxyjump}")
+    return " | ".join(parts)
+
+
 def init_curses_palette(curses_mod) -> dict[str, int]:
     palette = {name: 0 for name in TUI_COLOR_PAIR_IDS}
     try:
@@ -250,7 +265,7 @@ def init_curses_palette(curses_mod) -> dict[str, int]:
             "brand": (curses_mod.COLOR_CYAN, -1),
             "accent": (curses_mod.COLOR_GREEN, -1),
             "favorite": (curses_mod.COLOR_YELLOW, -1),
-            "muted": (curses_mod.COLOR_BLUE, -1),
+            "muted": (curses_mod.COLOR_WHITE, -1),
             "error": (curses_mod.COLOR_RED, -1),
         }
         for name, (foreground, background) in pair_defs.items():
@@ -484,6 +499,18 @@ def breadcrumb_path(path: str, max_parts: int = 4) -> str:
     return "... / " + " / ".join(parts[-max_parts:])
 
 
+def write_effective_ssh_config(source_path: Path, target_path: Path) -> None:
+    parts: list[str] = []
+    for file_path in iter_ssh_config_files(source_path):
+        parts.append(f"# Source: {file_path}\n")
+        for raw_line in file_path.read_text(encoding="utf-8").splitlines():
+            tokens = parse_config_line(raw_line)
+            if tokens and tokens[0].lower() == "include":
+                continue
+            parts.append(f"{raw_line}\n")
+    target_path.write_text("".join(parts), encoding="utf-8")
+
+
 def iter_ssh_config_files(config_path: Path) -> list[Path]:
     visited: set[Path] = set()
     ordered: list[Path] = []
@@ -526,6 +553,137 @@ def parse_hosts_from_configs(config_path: Path) -> list[str]:
     return unique_preserving_order(hosts)
 
 
+def has_unsafe_config_chars(value: str) -> bool:
+    return any(char in value for char in ("\n", "\r", "\0"))
+
+
+def validate_new_host_entry(entry: SSHHostEntry, existing_hosts: list[str]) -> list[str]:
+    errors: list[str] = []
+    alias = entry.alias.strip()
+    hostname = entry.hostname.strip()
+
+    if not alias:
+        errors.append("El alias es obligatorio.")
+    elif not is_selectable_host(alias) or any(char.isspace() for char in alias):
+        errors.append("El alias no puede tener espacios, comodines ni negaciones.")
+    elif alias in existing_hosts:
+        errors.append(f"Ya existe un Host `{alias}` en la config.")
+
+    if not hostname:
+        errors.append("HostName/IP es obligatorio.")
+
+    for label, value in [
+        ("Alias", alias),
+        ("HostName", hostname),
+        ("User", entry.user.strip()),
+        ("Port", entry.port.strip()),
+        ("ProxyJump", entry.proxyjump.strip()),
+        ("IdentityFile", entry.identity_file.strip()),
+    ]:
+        if has_unsafe_config_chars(value):
+            errors.append(f"{label} contiene caracteres no seguros.")
+
+    if entry.port.strip():
+        try:
+            port = int(entry.port)
+        except ValueError:
+            errors.append("Port debe ser un numero entre 1 y 65535.")
+        else:
+            if port < 1 or port > 65535:
+                errors.append("Port debe ser un numero entre 1 y 65535.")
+
+    return errors
+
+
+def quote_ssh_config_value(value: str) -> str:
+    if not value:
+        return ""
+    if any(char.isspace() or char in ('"', "\\") for char in value):
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    return value
+
+
+def format_ssh_host_entry(entry: SSHHostEntry) -> str:
+    lines = [
+        f"Host {entry.alias.strip()}",
+        f"    HostName {quote_ssh_config_value(entry.hostname.strip())}",
+    ]
+    optional_fields = [
+        ("User", entry.user.strip()),
+        ("Port", entry.port.strip()),
+        ("ProxyJump", entry.proxyjump.strip()),
+        ("IdentityFile", entry.identity_file.strip()),
+    ]
+    for key, value in optional_fields:
+        if value:
+            lines.append(f"    {key} {quote_ssh_config_value(value)}")
+    return "\n".join(lines) + "\n"
+
+
+def append_ssh_host_entry(config_path: Path, entry: SSHHostEntry) -> None:
+    existing_hosts = parse_hosts_from_configs(config_path) if config_path.exists() else []
+    errors = validate_new_host_entry(entry, existing_hosts)
+    if errors:
+        raise SSHHomeError(errors[0])
+
+    if config_path.exists() and not config_path.is_file():
+        raise SSHHomeError(f"La ruta de config SSH no es un archivo: {config_path}")
+
+    config_existed = config_path.exists()
+    config_path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    needs_separator = config_path.exists() and config_path.stat().st_size > 0
+    needs_newline = False
+    if needs_separator:
+        with config_path.open("rb") as existing:
+            existing.seek(-1, os.SEEK_END)
+            needs_newline = existing.read(1) != b"\n"
+
+    with config_path.open("a", encoding="utf-8") as target:
+        if needs_newline:
+            target.write("\n")
+        if needs_separator:
+            target.write("\n")
+        target.write("# Added by ssh-home\n")
+        target.write(format_ssh_host_entry(entry))
+    if not config_existed:
+        config_path.chmod(0o600)
+
+
+def prompt_new_host_entry(
+    io: PromptIO,
+    existing_hosts: list[str],
+    defaults: SSHHostEntry | None = None,
+) -> SSHHostEntry:
+    default = defaults or SSHHostEntry(alias="", hostname="")
+    io.println("Nuevo endpoint SSH")
+    io.println("Deja vacios los campos opcionales. No se guardan contrasenas.")
+
+    def ask(label: str, current: str = "", required: bool = False) -> str:
+        while True:
+            suffix = f" [{current}]" if current else ""
+            answer = io.prompt(f"{label}{suffix}: ").strip()
+            value = answer or current
+            if value or not required:
+                return value
+            io.println(f"{label} es obligatorio.")
+
+    while True:
+        entry = SSHHostEntry(
+            alias=ask("Alias", default.alias, required=True),
+            hostname=ask("HostName/IP", default.hostname, required=True),
+            user=ask("User", default.user),
+            port=ask("Port", default.port),
+            proxyjump=ask("ProxyJump", default.proxyjump),
+            identity_file=ask("IdentityFile", default.identity_file),
+        )
+        errors = validate_new_host_entry(entry, existing_hosts)
+        if not errors:
+            return entry
+        io.println(errors[0])
+        default = entry
+
+
 def _resolve_host_from_effective_config(alias: str, config_path: Path) -> ResolvedHost:
     cmd = ["ssh", "-G", "-F", str(config_path), alias]
     result = subprocess.run(
@@ -540,11 +698,16 @@ def _resolve_host_from_effective_config(alias: str, config_path: Path) -> Resolv
         raise SSHHomeError(f"No pude resolver `{alias}`: {message}")
 
     values: dict[str, str] = {}
+    identity_files: list[str] = []
     for raw_line in result.stdout.splitlines():
         parts = raw_line.split(None, 1)
         if len(parts) == 2:
             key, value = parts
-            values[key.lower()] = value.strip()
+            lowered_key = key.lower()
+            cleaned_value = value.strip()
+            values[lowered_key] = cleaned_value
+            if lowered_key == "identityfile":
+                identity_files.append(cleaned_value)
 
     return ResolvedHost(
         alias=alias,
@@ -552,6 +715,7 @@ def _resolve_host_from_effective_config(alias: str, config_path: Path) -> Resolv
         user=values.get("user", ""),
         port=values.get("port", ""),
         proxyjump=values.get("proxyjump", ""),
+        identityfile=", ".join(unique_preserving_order(identity_files)),
     )
 
 
@@ -704,10 +868,12 @@ class SSHHomeTUI:
         state: SSHHomeState,
         initial_host: str | None = None,
         initial_path: str | None = None,
+        source_config_path: Path | None = None,
     ) -> None:
         self.stdscr = stdscr
         self.hosts = hosts
         self.config_path = config_path
+        self.source_config_path = source_config_path or config_path
         self.state = state
         self.initial_host = initial_host
         self.initial_path = initial_path
@@ -775,6 +941,9 @@ class SSHHomeTUI:
                 self.state.save()
                 self.host_index = 0
                 self.status_message = "Showing recent hosts"
+                continue
+            if not self.host_query and key in ("n", "N"):
+                self._add_endpoint_interactively()
                 continue
             if not self.host_query and key in ("f", "F"):
                 if selected is not None:
@@ -1002,6 +1171,74 @@ class SSHHomeTUI:
         self._draw(height - 1, 0, current, width - 1)
         self.stdscr.refresh()
 
+    def _add_endpoint_interactively(self) -> None:
+        entry = self._prompt_host_entry()
+        if entry is None:
+            self.status_message = "Endpoint add cancelled"
+            return
+        try:
+            append_ssh_host_entry(self.source_config_path, entry)
+            if self.source_config_path != self.config_path:
+                write_effective_ssh_config(self.source_config_path, self.config_path)
+            self.hosts = parse_hosts_from_configs(self.source_config_path)
+            self.resolved_cache.clear()
+            self.host_view = HOST_VIEW_ALL
+            self.state.set_preference("view", self.host_view)
+            self.state.save()
+            self.host_query = entry.alias
+            self.host_index = 0
+            self.status_message = f"Endpoint added: {entry.alias}"
+        except SSHHomeError as exc:
+            self.status_message = str(exc)
+
+    def _prompt_host_entry(self) -> SSHHostEntry | None:
+        defaults = SSHHostEntry(alias="", hostname="")
+
+        def ask(label: str, current: str = "", required: bool = False) -> str | None:
+            while True:
+                suffix = f" [{current}]" if current else ""
+                value = self._prompt_line(f"{label}{suffix}: ")
+                if value is None:
+                    return None
+                answer = value.strip() or current
+                if answer or not required:
+                    return answer
+                self.status_message = f"{label} is required"
+
+        while True:
+            alias = ask("New alias", defaults.alias, required=True)
+            if alias is None:
+                return None
+            hostname = ask("HostName/IP", defaults.hostname, required=True)
+            if hostname is None:
+                return None
+            user = ask("User", defaults.user)
+            if user is None:
+                return None
+            port = ask("Port", defaults.port)
+            if port is None:
+                return None
+            proxyjump = ask("ProxyJump", defaults.proxyjump)
+            if proxyjump is None:
+                return None
+            identity_file = ask("IdentityFile", defaults.identity_file)
+            if identity_file is None:
+                return None
+
+            entry = SSHHostEntry(
+                alias=alias,
+                hostname=hostname,
+                user=user,
+                port=port,
+                proxyjump=proxyjump,
+                identity_file=identity_file,
+            )
+            errors = validate_new_host_entry(entry, self.hosts)
+            if not errors:
+                return entry
+            self.status_message = errors[0]
+            defaults = entry
+
     def _attr(
         self,
         color: str | None = None,
@@ -1078,7 +1315,7 @@ class SSHHomeTUI:
         width = layout.panel_width
         row = 4 if layout.mode == "full" else 5
         self._draw(row, x, "SSH NODE", width, self._attr("brand", bold=True))
-        self._draw(row + 1, x, "ssh://home", width, self._attr("accent"))
+        self._draw(row + 1, x, resolved_endpoint_summary(resolved), width, self._attr("accent"))
         self._draw(row + 2, x, "project by srdize3322", width, self._attr("muted", dim=True))
 
         details = [
@@ -1087,6 +1324,7 @@ class SSHHomeTUI:
             ("HostName", resolved.hostname or "-"),
             ("Port", resolved.port or "-"),
             ("ProxyJump", resolved.proxyjump or "-"),
+            ("Identity", resolved.identityfile or "-"),
             ("Favorite", "yes" if self.state.is_favorite(selected) else "no"),
             ("Last path", self.state.last_path(selected) or "-"),
         ]
@@ -1196,6 +1434,7 @@ class SSHHomeTUI:
                     "l last path",
                     "r recents",
                     "a all",
+                    "n new host",
                     "Tab view",
                     "q quit",
                 ],
@@ -1204,7 +1443,10 @@ class SSHHomeTUI:
                 help_width,
             )
 
-        footer = f"{self.status_message} | ? help | Enter open | f fav | l last | r recent | a all | Tab view | q"
+        footer = (
+            f"{self.status_message} | ? help | Enter open | n new | f fav | "
+            "l last | r recent | a all | Tab view | q"
+        )
         self._draw(height - 1, 0, footer, width - 1, self._attr("muted", dim=True))
         self.stdscr.refresh()
 
@@ -1347,6 +1589,7 @@ def run_tui(
     state: SSHHomeState,
     initial_host: str | None = None,
     initial_path: str | None = None,
+    source_config_path: Path | None = None,
 ) -> TUISelection:
     import curses
 
@@ -1361,6 +1604,7 @@ def run_tui(
             state,
             initial_host=initial_host,
             initial_path=initial_path,
+            source_config_path=source_config_path,
         )
         return ui.run()
 
@@ -1459,7 +1703,7 @@ def print_host_list(hosts: list[str], config_path: Path, show_resolved: bool) ->
             print(host)
         return 0
 
-    print("alias\thostname\tuser\tport\tproxyjump")
+    print("alias\thostname\tuser\tport\tproxyjump\tidentityfile")
     with EffectiveSSHConfig(config_path) as effective_config:
         for host in hosts:
             resolved = _resolve_host_from_effective_config(host, effective_config)
@@ -1471,6 +1715,7 @@ def print_host_list(hosts: list[str], config_path: Path, show_resolved: bool) ->
                         resolved.user or "-",
                         resolved.port or "-",
                         resolved.proxyjump or "-",
+                        resolved.identityfile or "-",
                     ]
                 )
             )
@@ -1495,7 +1740,7 @@ def run(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--show-resolved",
         action="store_true",
-        help="Mostrar HostName/User/Port/ProxyJump resueltos con ssh -G.",
+        help="Mostrar HostName/User/Port/ProxyJump/IdentityFile resueltos con ssh -G.",
     )
     parser.add_argument(
         "--no-tui",
@@ -1517,7 +1762,38 @@ def run(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Borrar recientes y últimas rutas sin tocar favoritos.",
     )
+    parser.add_argument(
+        "--add",
+        action="store_true",
+        help="Agregar un nuevo endpoint al archivo SSH config y salir.",
+    )
+    parser.add_argument("--add-alias", help="Alias del nuevo endpoint para --add.")
+    parser.add_argument("--hostname", help="HostName/IP del nuevo endpoint para --add.")
+    parser.add_argument("--ssh-user", help="User del nuevo endpoint para --add.")
+    parser.add_argument("--port", help="Port del nuevo endpoint para --add.")
+    parser.add_argument("--proxyjump", help="ProxyJump del nuevo endpoint para --add.")
+    parser.add_argument("--identity-file", help="IdentityFile del nuevo endpoint para --add.")
     args = parser.parse_args(argv)
+
+    config_path = Path(os.path.expanduser(args.config)).resolve()
+
+    if args.add:
+        existing_hosts = parse_hosts_from_configs(config_path) if config_path.exists() else []
+        defaults = SSHHostEntry(
+            alias=args.add_alias or "",
+            hostname=args.hostname or "",
+            user=args.ssh_user or "",
+            port=args.port or "",
+            proxyjump=args.proxyjump or "",
+            identity_file=args.identity_file or "",
+        )
+        if args.add_alias and args.hostname:
+            entry = defaults
+        else:
+            entry = prompt_new_host_entry(PromptIO(), existing_hosts, defaults)
+        append_ssh_host_entry(config_path, entry)
+        print(f"Endpoint `{entry.alias}` agregado en `{config_path}`.")
+        return 0
 
     state = SSHHomeState.disabled()
     if not args.no_state:
@@ -1527,7 +1803,6 @@ def run(argv: list[str] | None = None) -> int:
             state.clear_history()
             state.save()
 
-    config_path = Path(os.path.expanduser(args.config)).resolve()
     if not config_path.is_file():
         raise SSHHomeError(f"No existe el archivo de config SSH: {config_path}")
 
@@ -1542,7 +1817,13 @@ def run(argv: list[str] | None = None) -> int:
     with EffectiveSSHConfig(config_path) as effective_config:
         final_session: SSHMasterSession | None = None
         if can_use_tui() and not args.no_tui and args.path is None:
-            selection = run_tui(hosts, effective_config, state, initial_host=args.host)
+            selection = run_tui(
+                hosts,
+                effective_config,
+                state,
+                initial_host=args.host,
+                source_config_path=config_path,
+            )
             selected_host = selection.host
             target_path = selection.path
             final_session = selection.session
@@ -1564,6 +1845,7 @@ def run(argv: list[str] | None = None) -> int:
                 print(f"User: {resolved.user or '-'}")
                 print(f"Port: {resolved.port or '-'}")
                 print(f"ProxyJump: {resolved.proxyjump or '-'}")
+                print(f"IdentityFile: {resolved.identityfile or '-'}")
 
             if args.path:
                 target_path = args.path

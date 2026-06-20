@@ -95,6 +95,88 @@ class ResolutionTests(unittest.TestCase):
         self.assertEqual(resolved.user, "root")
         self.assertEqual(resolved.port, "22")
         self.assertEqual(resolved.proxyjump, "gateway")
+        self.assertIn("id_test", resolved.identityfile)
+
+
+class AddEndpointTests(unittest.TestCase):
+    def test_format_ssh_host_entry_writes_only_present_fields(self) -> None:
+        entry = ssh_home.SSHHostEntry(
+            alias="media-box",
+            hostname="203.0.113.20",
+            user="admin",
+            port="2222",
+            identity_file="~/.ssh/id_media",
+        )
+
+        self.assertEqual(
+            ssh_home.format_ssh_host_entry(entry),
+            "\n".join(
+                [
+                    "Host media-box",
+                    "    HostName 203.0.113.20",
+                    "    User admin",
+                    "    Port 2222",
+                    "    IdentityFile ~/.ssh/id_media",
+                    "",
+                ]
+            ),
+        )
+
+    def test_append_ssh_host_entry_creates_config_and_parses_new_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "ssh" / "config"
+            entry = ssh_home.SSHHostEntry(
+                alias="lab-box",
+                hostname="203.0.113.30",
+                user="ubuntu",
+            )
+
+            ssh_home.append_ssh_host_entry(config_path, entry)
+
+            text = config_path.read_text(encoding="utf-8")
+            self.assertIn("# Added by ssh-home", text)
+            self.assertIn("Host lab-box", text)
+            self.assertEqual(config_path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(ssh_home.parse_hosts_from_configs(config_path), ["lab-box"])
+
+    def test_append_ssh_host_entry_rejects_duplicate_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config"
+            config_path.write_text(
+                "Host app-prod\n    HostName 203.0.113.10\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ssh_home.SSHHomeError):
+                ssh_home.append_ssh_host_entry(
+                    config_path,
+                    ssh_home.SSHHostEntry(alias="app-prod", hostname="203.0.113.11"),
+                )
+
+    def test_run_add_endpoint_accepts_noninteractive_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config"
+            with mock.patch("sys.stdout", new=io.StringIO()) as buffer:
+                exit_code = ssh_home.run(
+                    [
+                        "--add",
+                        "--config",
+                        str(config_path),
+                        "--add-alias",
+                        "edge-box",
+                        "--hostname",
+                        "203.0.113.40",
+                        "--ssh-user",
+                        "deploy",
+                        "--port",
+                        "2200",
+                        "--no-state",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            self.assertIn("edge-box", buffer.getvalue())
+            self.assertIn("Host edge-box", config_path.read_text(encoding="utf-8"))
 
 
 class StateTests(unittest.TestCase):

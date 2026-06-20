@@ -1,173 +1,206 @@
 # ssh-home
 
-Gestor SSH interactivo y portable para equipos que ya tienen OpenSSH configurado. Proyecto de `srdize3322`.
+`ssh-home` is a portable SSH cockpit for people who already manage their machines with OpenSSH config aliases. It is a public project by `srdize3322`.
 
-`ssh-home` lee únicamente tu `~/.ssh/config` local, muestra los aliases disponibles, abre una conexión maestra temporal y te deja navegar carpetas remotas antes de entrar al shell definitivo. No usa inventarios privados, no depende de `.env` y no guarda contraseñas.
+It reads the local `~/.ssh/config`, shows your SSH aliases in a sober terminal UI, lets you inspect resolved endpoint metadata, browse remote folders, and then drops into a normal SSH shell in the selected directory.
 
-La interfaz tiene un look sobrio de homelab/cockpit: header `ssh-home :: project by srdize3322`, badge `ssh://home`, colores discretos si el terminal los soporta y un mini gráfico local de favoritos/recientes/otros hosts.
+No secrets are bundled. No private inventory is read. Passwords and key prompts stay inside the system `ssh` binary.
 
-## Comando global
+## Highlights
 
-Si enlazas el launcher `ssh-home` dentro de un directorio que ya esté en tu `PATH` como `~/.local/bin`, puedes ejecutarlo desde cualquier carpeta:
+- Global command: `ssh-home`
+- Source of truth: your local OpenSSH config
+- TUI with keyboard navigation, favorites, recents, filters and help
+- Extra endpoint metadata: `HostName`, `User`, `Port`, `ProxyJump`, `IdentityFile`
+- Add new SSH endpoints with `ssh-home --add` or the `n` shortcut in the TUI
+- Remote directory browser before opening the final shell
+- Clean terminal handoff: the TUI exits before the final SSH session starts
+- Local-only state for favorites, recents and last paths
+- Python stdlib only, no package install required
+
+## Install
+
+Clone the repo:
+
+```bash
+git clone https://github.com/srdize3322/ssh-home.git
+cd ssh-home
+chmod +x ssh-home ssh-home.py
+```
+
+Make the command available from anywhere:
+
+```bash
+mkdir -p "$HOME/.local/bin"
+ln -sfn "$PWD/ssh-home" "$HOME/.local/bin/ssh-home"
+```
+
+Make sure `~/.local/bin` is in your `PATH`, then run:
 
 ```bash
 ssh-home
 ```
 
-Ejemplo de enlace:
+## One-Line Run
 
-```bash
-ln -sfn /ruta/a/ssh-home/ssh-home ~/.local/bin/ssh-home
-```
-
-## Qué hace
-
-- Lista aliases SSH detectados en `~/.ssh/config` y `Include` relacionados.
-- Ignora entradas globales o wildcard como `Host *` y `Host jump-*`.
-- Resuelve `HostName`, `User`, `Port` y `ProxyJump` con `ssh -G`.
-- Reutiliza una conexión maestra temporal para evitar múltiples prompts de autenticación.
-- Abre una TUI estilo homelab/cockpit con favoritos, recientes, filtro al escribir y navegación hacia atrás.
-- Muestra un cockpit sobrio con logo `ssh://home`, metadata del host y mini gráfico de hosts.
-- Permite navegar directorios remotos antes de abrir la sesión final.
-- Sale de la TUI antes de lanzar `ssh`, para que el shell remoto ocupe el terminal normal.
-- Reutiliza la misma conexión autenticada del navegador remoto para abrir el shell final.
-- Guarda favoritos, recientes y última ruta por host en estado local privado.
-- Soporta ejecución interactiva incluso cuando el script llega por `curl | python3 -`.
-
-## Requisitos
-
-- `python3`
-- Cliente `ssh` de OpenSSH
-- Un `~/.ssh/config` válido en el equipo donde corras la herramienta
-
-## Uso
-
-```bash
-ssh-home
-```
-
-Alternativa equivalente:
-
-```bash
-python3 ssh-home.py
-```
-
-Flags disponibles:
-
-```bash
-./ssh-home --list
-./ssh-home --list --show-resolved
-./ssh-home --host app-prod
-./ssh-home --host app-prod --path /srv/app/current
-./ssh-home --config ~/.ssh/config
-./ssh-home --host app-prod --show-resolved
-./ssh-home --no-tui
-./ssh-home --state-file /tmp/ssh-home-state.json
-./ssh-home --no-state
-./ssh-home --clear-history
-```
-
-Equivalentes con Python explícito:
-
-```bash
-python3 ssh-home.py --list
-python3 ssh-home.py --list --show-resolved
-python3 ssh-home.py --host app-prod
-python3 ssh-home.py --host app-prod --path /srv/app/current
-python3 ssh-home.py --config ~/.ssh/config
-python3 ssh-home.py --host app-prod --show-resolved
-python3 ssh-home.py --no-tui
-python3 ssh-home.py --state-file /tmp/ssh-home-state.json
-python3 ssh-home.py --no-state
-python3 ssh-home.py --clear-history
-```
-
-## Flujo interactivo
-
-1. Elige un alias SSH con flechas o escribiendo para filtrar.
-2. Si el host pide contraseña, `ssh` la solicita con su prompt nativo.
-3. Navega carpetas remotas:
-   - `Up` / `Down`: mover selección
-   - `Enter`: entrar o usar la carpeta actual
-   - `Left` o `Backspace`: subir un nivel
-   - escribir: filtrar directorios visibles
-   - `/`: escribir una ruta manual
-   - `f`: marcar o desmarcar favorito
-   - `l`: saltar a la última ruta usada en el host
-   - `r`: ver recientes en hosts o refrescar directorio remoto
-   - `a`: volver a todos los hosts
-   - `?`: mostrar ayuda compacta
-   - `Tab`: volver a la lista de hosts
-   - `q`: cancelar
-4. Se abre un shell remoto directamente dentro de la carpeta elegida.
-
-## Interfaz visual
-
-- En terminales amplias muestra lista de hosts, panel lateral con metadata y gráfico compacto.
-- En terminales medianas usa un panel compacto sin elementos que choquen.
-- En terminales pequeñas oculta logo/gráfico y deja una vista mínima usable.
-- Si `curses` no puede usar color, mantiene la misma navegación en monocromo.
-
-## Estado local
-
-Por defecto `ssh-home` guarda estado local en:
-
-```bash
-~/.config/ssh-home/state.json
-```
-
-Ese archivo puede contener aliases SSH, favoritos, recientes y últimas rutas remotas. No guarda contraseñas, llaves, IPs resueltas ni variables de entorno.
-
-Para usar otro archivo:
-
-```bash
-ssh-home --state-file /tmp/ssh-home-state.json
-```
-
-Para desactivar el estado:
-
-```bash
-ssh-home --no-state
-```
-
-Para limpiar recientes y últimas rutas sin borrar favoritos:
-
-```bash
-ssh-home --clear-history
-```
-
-## Ejecución vía curl
+Run directly from GitHub without installing:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/srdize3322/ssh-home/main/ssh-home.py | python3 -
 ```
 
-También puedes descargarlo y ejecutarlo localmente:
+Or download to a temporary path:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/srdize3322/ssh-home/main/ssh-home.py -o /tmp/ssh-home.py
 python3 /tmp/ssh-home.py
 ```
 
-## Seguridad
+## Daily Usage
 
-- No incluye claves, hosts reales, inventarios privados ni variables de entorno.
-- Solo usa información que ya existe en la config SSH del equipo actual.
-- La autenticación sigue ocurriendo en el binario `ssh` del sistema.
-- El socket de control vive en `/tmp` y se limpia al salir.
-- El estado local es privado del equipo y nunca forma parte de la repo.
+Open the interactive cockpit:
 
-## Desarrollo
+```bash
+ssh-home
+```
 
-Ejecutar tests:
+List detected aliases:
+
+```bash
+ssh-home --list
+```
+
+List aliases with resolved OpenSSH metadata:
+
+```bash
+ssh-home --list --show-resolved
+```
+
+Jump directly to a host:
+
+```bash
+ssh-home --host app-prod
+```
+
+Jump directly to a host and path:
+
+```bash
+ssh-home --host app-prod --path /srv/app/current
+```
+
+Use a custom config file:
+
+```bash
+ssh-home --config ./examples/ssh_config
+```
+
+## Add Endpoints
+
+Start the interactive endpoint wizard:
+
+```bash
+ssh-home --add
+```
+
+Add an endpoint non-interactively:
+
+```bash
+ssh-home --add \
+  --add-alias app-prod \
+  --hostname 203.0.113.10 \
+  --ssh-user deploy \
+  --port 2222
+```
+
+Optional fields:
+
+```bash
+ssh-home --add \
+  --add-alias app-via-gateway \
+  --hostname 198.51.100.7 \
+  --ssh-user root \
+  --proxyjump gateway \
+  --identity-file ~/.ssh/id_example
+```
+
+Inside the TUI, press `n` from the host list to add a new endpoint without leaving the app.
+
+`ssh-home` appends a clean `Host` block to the config file selected by `--config` or `~/.ssh/config`. It does not store passwords.
+
+## TUI Shortcuts
+
+- `Up` / `Down`: move selection
+- `Enter`: open host, enter directory, or use current directory
+- type: filter visible hosts or directories
+- `Backspace`: edit filter, or go up one remote directory when the filter is empty
+- `Left`: go up one remote directory
+- `/`: type a manual remote path
+- `n`: add a new SSH endpoint from the host list
+- `f`: toggle favorite
+- `l`: jump to last path for the selected host
+- `r`: show recents on host list, or refresh remote directory
+- `a`: show all hosts
+- `Tab`: cycle host views or return to host list
+- `?`: help
+- `q`: quit
+
+## Local State
+
+By default, local convenience state lives at:
+
+```bash
+~/.config/ssh-home/state.json
+```
+
+It can contain SSH aliases, favorites, recent timestamps and last remote paths. It does not store passwords, private keys, resolved IP inventory or environment variables.
+
+Use another state file:
+
+```bash
+ssh-home --state-file /tmp/ssh-home-state.json
+```
+
+Disable state:
+
+```bash
+ssh-home --no-state
+```
+
+Clear recents and last paths while keeping favorites:
+
+```bash
+ssh-home --clear-history
+```
+
+## Security Model
+
+- Public repo contains no real hosts, private paths, credentials or environment files.
+- Runtime host data comes only from the machine where the command runs.
+- Authentication is handled by OpenSSH, not by `ssh-home`.
+- New endpoints are appended to the selected SSH config as plain OpenSSH config blocks.
+- The temporary SSH control socket is created under `/tmp` and cleaned up on exit.
+
+## Development
+
+Run tests:
 
 ```bash
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-## Limitaciones
+Compile-check the script:
 
-- El navegador remoto asume un shell POSIX con `sh`, `find`, `sed` y `sort`.
-- Está pensado para macOS y Linux con OpenSSH disponible.
-- No intenta editar ni sincronizar tu config SSH.
-- Si el terminal no soporta `curses` o no tiene TTY real, cae a un modo texto simple como fallback.
+```bash
+python3 -m py_compile ssh-home.py
+```
+
+## Requirements
+
+- macOS or Linux
+- `python3`
+- OpenSSH client with `ssh`
+- A valid SSH config, or use `ssh-home --add` to create the first endpoint
+
+## License
+
+MIT
