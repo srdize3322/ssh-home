@@ -1,0 +1,23 @@
+# Sanitized SSH config fixture for tests
+
+Host *
+    AddKeysToAgent yes
+    IdentityFile ~/.ssh/id_test
+
+Include ssh_config.d/*.conf
+
+Host app-prod app-stage
+    HostName 203.0.113.10
+    User deploy
+    Port 2222
+
+Host jump-*
+    HostName 203.0.113.99
+
+Host !excluded
+    HostName 203.0.113.55
+
+Host proxied
+    HostName 198.51.100.7
+    User root
+    ProxyJump gateway
